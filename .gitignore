@@ -1,0 +1,29 @@
+# 忽略编译输出
+build/
+Build/
+Debug/
+Release/
+
+# 忽略二进制和中间文件
+*.bin
+*.elf
+*.hex
+*.map
+*.o
+*.d
+*.lst
+*.axf
+
+# 忽略临时文件
+mx.scratch
+*.bak
+*.dep
+JLinkLog.txt
+.clangd/
+
+# 忽略 Keil 遗留配置 (以防万一)
+Objects/
+Listings/
+DebugConfig/
+*.uvguix.*
+*.scvd

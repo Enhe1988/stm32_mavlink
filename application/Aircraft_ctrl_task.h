@@ -1,0 +1,36 @@
+#ifndef __AIRCRAFT_CTRL_TASK_H__
+#define __AIRCRAFT_CTRL_TASK_H__
+#include "INS_task.h"
+#include "common/mavlink.h" 
+#define RC_DEADBAND  2               //遥控器死区值
+typedef enum
+{
+	
+  Aircraft_ZERO_FORCE = 0, 
+  Aircraft_InRing_P,    
+  Aircraft_InRing_R,	
+	Aircraft_OutRing_P,    
+  Aircraft_OutRing_R,
+  Aircraft_Auto,  //自动运行
+  Aircraft_RUN,   //正常运行        
+} aircraft_behaviour_e;
+
+typedef struct
+{
+	const ELRS_Data *remote_data;//遥控器api获取
+	const PC_Data_t *pc_data;//上位机数据
+	const IMU_data_t *IMU_data;//IMU数据实例化
+	aircraft_behaviour_e aircraft_behaviour; //飞行器状态机初始化
+  aircraft_behaviour_e last_aircraft_behaviour; //上一次飞行器状态机
+  float Roll_Rate_Set;//期望roll角速度
+	float Pitch_Rate_Set;//期望pitch角速度
+    float roll_motor_out;//roll舵机输出
+	float left_motor_out;//左舵机输出
+	float right_motor_out;//右舵机输出
+	float power_motor_out;//上升电机输出
+	float yaw_set_angle;//yaw期望角度
+} aircraft_control_t;
+void Aircraft_ctrl_task(void const *pvParameters);
+
+
+#endif
