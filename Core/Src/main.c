@@ -22,7 +22,6 @@
 #include "dma.h"
 #include "i2c.h"
 #include "spi.h"
-#include "stm32h7xx_hal.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -30,7 +29,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "spl06.h"
-#include "common/mavlink.h"
+#include "mavlink_app.h"
 #include "common.h"
 /* USER CODE END Includes */
 
@@ -41,7 +40,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+int watch_test=0;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -100,13 +99,14 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  HAL_Delay(2000);
   MX_DMA_Init();
   MX_TIM5_Init();
   MX_SPI1_Init();
   MX_USART3_UART_Init();
   MX_TIM3_Init();
   MX_I2C2_Init();
+  MX_SPI4_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   Mavlink_Init();//初始化串口DMA以及环形缓冲区
   HAL_TIM_PWM_Start(&htim5, TIM_CHANNEL_1);
@@ -121,6 +121,7 @@ int main(void)
   __HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_2, 1500);//初始舵机角度
   __HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_3, 1500);
   __HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_4, 1500);
+  watch_test=1000;
   /* USER CODE END 2 */
 
   /* Call init function for freertos objects (in cmsis_os2.c) */

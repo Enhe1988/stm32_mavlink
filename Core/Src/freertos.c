@@ -27,7 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "INS_task.h"
 #include "Aircraft_ctrl_task.h"
-#include "common/mavlink.h"
+#include "mavlink_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/

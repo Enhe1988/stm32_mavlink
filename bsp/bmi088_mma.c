@@ -685,8 +685,8 @@ int8_t bmi088_mma_init(struct bmi08_dev *dev)
     {
         /* Structure to define the default values for axes re-mapping *///����������ӳ�䣬��װλ������ϵ�ı�ʱ��������
       struct bmi08_axes_remap axes_remap = {
-            .x_axis = BMI088_MM_MAP_Z_AXIS, .x_axis_sign = BMI088_MM_MAP_POSITIVE, .y_axis = BMI088_MM_MAP_X_AXIS,
-            .y_axis_sign = BMI088_MM_MAP_POSITIVE, .z_axis = BMI088_MM_MAP_Y_AXIS, .z_axis_sign = BMI088_MM_MAP_NEGATIVE
+            .x_axis = BMI088_MM_MAP_X_AXIS, .x_axis_sign = BMI088_MM_MAP_POSITIVE, .y_axis = BMI088_MM_MAP_Y_AXIS,
+            .y_axis_sign = BMI088_MM_MAP_POSITIVE, .z_axis = BMI088_MM_MAP_Z_AXIS, .z_axis_sign = BMI088_MM_MAP_POSITIVE
         };
 
         /* Check for chip id validity */

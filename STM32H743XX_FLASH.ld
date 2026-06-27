@@ -242,6 +242,19 @@ SECTIONS
 
 
 
+  /* DMA-accessible, MPU-non-cacheable buffers (ICM-42688-P SPI4 DMA).
+   * DTCM(默认 RAM)DMA 访问不到,故放 RAM_D2(0x30000000);并由 MPU 标记非缓存
+   * (见 icm_platform.c)。放在 RAM_D2 起始,基址 0x30000000 对齐 MPU region。 */
+  .dma_buffer (NOLOAD) :
+  {
+    . = ALIGN(32);
+    _sdma_buffer = .;
+    *(.dma_buffer)
+    *(.dma_buffer*)
+    . = ALIGN(32);
+    _edma_buffer = .;
+  } >RAM_D2
+
   /* Remove information from the standard libraries */
   /DISCARD/ :
   {

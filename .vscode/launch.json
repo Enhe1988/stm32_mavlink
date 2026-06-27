@@ -17,6 +17,26 @@
                     "imageFileName": "${command:st-stm32-ide-debug-launch.get-projects-binary-from-context1}"
                 }
             ]
+        },
+        {
+            "name": "Cortex-Debug (ST-Link Live Watch)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/fly_control_stm.elf",
+            "servertype": "stlink",
+            "device": "STM32H743VI",
+            "interface": "swd",
+            "runToEntryPoint": "main",
+            "serverpath": "C:/Users/zzbon/AppData/Local/stm32cube/bundles/stlink-gdbserver/7.13.0+st.3/bin/ST-LINK_gdbserver.exe",
+            "armToolchainPath": "C:/Users/zzbon/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
+            "stm32cubeprogrammer": "D:/stm32cubepro/bin",
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 4
+            }
+            // 想看外设寄存器再补 SVD:把下行取消注释并放好 STM32H743.svd
+            // "svdFile": "${workspaceFolder}/STM32H743.svd"
         }
     ]
 }

@@ -1,7 +1,7 @@
 #ifndef __AIRCRAFT_CTRL_TASK_H__
 #define __AIRCRAFT_CTRL_TASK_H__
 #include "INS_task.h"
-#include "common/mavlink.h" 
+#include "mavlink_rc.h"   /* ELRS_Data / PC_Data_t 及遥控/上位机数据指针 */
 #define RC_DEADBAND  2               //遥控器死区值
 typedef enum
 {

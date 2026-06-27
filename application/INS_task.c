@@ -31,13 +31,17 @@
 #include "pid.h"
 #include "ahrs.h"
 #include "spl06.h"
+#include "imu_selftest.h"
+#include "imu_api.h"        // 统一 IMU 抽象层:imu_init/imu_start/imu_get_data + ImuData
+#include "bsp_config.h"     // IMU_CALIB_ON_BOOT / IMU_CALIB_SAMPLES
+#include "imu_calib.h"      // imu_calib_run / g_imu_bias
 #define GRAVITY_EARTH  (9.80665f)
-struct bmi08_sensor_data bmi08_accel;
-struct bmi08_sensor_data bmi08_gyro;
-struct bmi08_sensor_data bmi08_accel_offset;//校准使用数据实例化
-struct bmi08_sensor_data bmi08_gyro_offset;
-int8_t rslt;
-struct bmi08_dev bmi08;
+
+/* ── 调试观测(调试器 watch)── */
+volatile uint8_t  g_imu_init_ok     = 0;  /* imu_init 成功=1 */
+volatile uint32_t g_imu_loop_count  = 0;  /* INS_task 主循环计数 */
+volatile ImuData  g_imu_live        = {0};/* 最新一帧统一数据:gyro rad/s, accel m/s² */
+
 IMU_data_t imu_data;//IMU数据结构体实例化
 SPL06_t spl06_inst;//气压计实例化
 extern I2C_HandleTypeDef hi2c2; // 引用 CubeMX 生成的 I2C 句柄
@@ -146,23 +150,12 @@ void MadgwickAHRSupdateIMU(float gx, float gy, float gz, float ax, float ay, flo
     q2 *= recipNorm;
     q3 *= recipNorm;
 }
-void attitude_update_madgwick(float* INS_gyro, float* INS_accel)
+void attitude_update_madgwick(const float* gyro_rads, const float* accel_mps2)
 {
-
-
-   
-    float gx_algo_rad = -INS_gyro[2] * (M_PI / 180.0f); // Algo X = User Y
-    float gy_algo_rad = -INS_gyro[0] * (M_PI / 180.0f); // Algo Y = -User X
-    float gz_algo_rad = INS_gyro[1] * (M_PI / 180.0f); // Algo Z = User Z
-
- 
-    float ax_algo = INS_accel[0]; // Algo X = User Y
-    float ay_algo = INS_accel[1]; // Algo Y = -User X
-    float az_algo = INS_accel[2]; // Algo Z = User Z
-
-   
-    MadgwickAHRSupdateIMU(gx_algo_rad, gy_algo_rad, gz_algo_rad, 
-                          ax_algo, ay_algo, az_algo);
+    /* 统一接口已是机体系 rad/s、m/s²(传感器→机体映射在 imu_frame.c,板子放置在
+     * imu_orientation.h,均已标定),直接喂 AHRS。机体系:X前/Y右/Z下。 */
+    MadgwickAHRSupdateIMU(gyro_rads[0], gyro_rads[1], gyro_rads[2],
+                          accel_mps2[0], accel_mps2[1], accel_mps2[2]);
 
    
 
@@ -190,39 +183,8 @@ const IMU_data_t*get_imu_data_point(void)
 {
 	return &imu_data;
 }
-/*!
- * @brief This internal API is used to initialize the bmi08 sensor
- */
-static void init_bmi08(struct bmi08_dev *bmi08dev);
-
-/*!
- * @brief This internal API is used to configure accel and gyro data ready interrupts
- */
-static void configure_accel_gyro_data_ready_interrupts(struct bmi08_dev *bmi08dev);
-
-/*!
- *  @brief This function converts lsb to meter per second squared for 16 bit accelerometer at
- *  range 2G, 4G, 8G or 16G.
- *
- *  @param[in] val       : LSB from each axis.
- *  @param[in] g_range   : Gravity range.
- *  @param[in] bit_width : Resolution for accel.
- *
- *  @return Value in Meter Per second squared.
- */
-static float lsb_to_mps2(int16_t val, float g_range, uint8_t bit_width);
-
-/*!
- *  @brief This function converts lsb to degree per second for 16 bit gyro at
- *  range 125, 250, 500, 1000 or 2000dps.
- *
- *  @param[in] val       : LSB from each axis.
- *  @param[in] dps       : Degree per second.
- *  @param[in] bit_width : Resolution for gyro.
- *
- *  @return Value in Degree Per Second.
- */
-static float lsb_to_dps(int16_t val, float dps, uint8_t bit_width);
+/* 注:BMI088 的初始化/量程换算/零偏/中断配置已全部迁入 bsp/imu/Bmi088 驱动。
+ *     ICM-42688-P 在 bsp/imu/Icm42688p 驱动。INS_task 只经统一接口取数。 */
 /*********************************************************************/
 /*                          Functions                                */
 /*********************************************************************/
@@ -235,131 +197,6 @@ static float lsb_to_dps(int16_t val, float dps, uint8_t bit_width);
  *  @return void
  *
  */
-static void init_bmi08(struct bmi08_dev *bmi08dev)
-{
-    int8_t rslt;
-
-    /* Initialize bmi08 sensors (accel & gyro) *///读取加速度计和陀螺仪的芯片id
-    if (bmi088_mma_init(bmi08dev) == BMI08_OK && bmi08g_init(bmi08dev) == BMI08_OK)
-	
-    {
-//        printf("BMI08 initialization success!\n");
-//        printf("Accel chip ID - 0x%x\n", bmi08dev->accel_chip_id);
-//        printf("Gyro chip ID - 0x%x\n", bmi08dev->gyro_chip_id);
-
-        /* Reset the accelerometer */
-        rslt = bmi08a_soft_reset(bmi08dev);
-			  
-    }
-    else
-    {
-			
-//        printf("BMI08 initialization failure!\n");
-        return;
-    }
-    
-    if (rslt == BMI08_OK)
-    {
-        /* Set accel power mode */
-        bmi08dev->accel_cfg.power = BMI08_ACCEL_PM_ACTIVE;
-        rslt = bmi08a_set_power_mode(bmi08dev);
-    }
-
-    if (rslt == BMI08_OK)
-    {
-        bmi08dev->gyro_cfg.power = BMI08_GYRO_PM_NORMAL;
-        rslt = bmi08g_set_power_mode(bmi08dev);
-    }
-
-    if (rslt == BMI08_OK)
-    {
-        bmi08dev->accel_cfg.odr = BMI08_ACCEL_ODR_800_HZ;//100
-        bmi08dev->accel_cfg.range = BMI088_MM_ACCEL_RANGE_6G;
-
-        bmi08dev->accel_cfg.power = BMI08_ACCEL_PM_ACTIVE;
-        bmi08dev->accel_cfg.bw = BMI08_ACCEL_BW_NORMAL; /* Bandwidth and OSR are same */
-
-        rslt = bmi08a_set_power_mode(bmi08dev);
-
-        if (rslt == BMI08_OK)
-        {
-            rslt = bmi088_mma_set_meas_conf(bmi08dev);
-            bmi08_check_rslt("bmi088_mma_set_meas_conf", rslt);
-
-            bmi08dev->gyro_cfg.odr = BMI08_GYRO_BW_116_ODR_1000_HZ;//32/100
-            bmi08dev->gyro_cfg.range = BMI08_GYRO_RANGE_1000_DPS;//1000
-            bmi08dev->gyro_cfg.bw = BMI08_GYRO_BW_32_ODR_100_HZ;//32/100
-            bmi08dev->gyro_cfg.power = BMI08_GYRO_PM_NORMAL;
-
-            rslt = bmi08g_set_power_mode(bmi08dev);
-
-            if (rslt == BMI08_OK)
-            {
-                rslt = bmi08g_set_meas_conf(bmi08dev);
-                bmi08_check_rslt("bmi08g_set_meas_conf", rslt);
-            }
-        }
-    }
-}
-static void configure_accel_gyro_data_ready_interrupts(struct bmi08_dev *bmi08dev)
-{
-    int8_t rslt;
-    struct bmi08_accel_int_channel_cfg accel_int_config;
-    struct bmi08_gyro_int_channel_cfg gyro_int_config;
-
-    /* Configure the Interrupt configurations for accel */
-    accel_int_config.int_channel = BMI08_INT_CHANNEL_1;
-    accel_int_config.int_type = BMI08_ACCEL_INT_DATA_RDY;
-    accel_int_config.int_pin_cfg.lvl = BMI08_INT_ACTIVE_HIGH;
-    accel_int_config.int_pin_cfg.output_mode = BMI08_INT_MODE_PUSH_PULL;
-    accel_int_config.int_pin_cfg.enable_int_pin = BMI08_ENABLE;
-
-    /* Set the interrupt configuration */
-    rslt = bmi088_mma_set_int_config(&accel_int_config, BMI088_MM_ACCEL_DATA_RDY_INT, bmi08dev);
-
-    if (rslt == BMI08_OK)
-    {
-        /* Configure the Interrupt configurations for gyro */
-        gyro_int_config.int_channel = BMI08_INT_CHANNEL_3;
-        gyro_int_config.int_type = BMI08_GYRO_INT_DATA_RDY;
-        gyro_int_config.int_pin_cfg.enable_int_pin = BMI08_ENABLE;
-        gyro_int_config.int_pin_cfg.lvl = BMI08_INT_ACTIVE_HIGH;
-        gyro_int_config.int_pin_cfg.output_mode = BMI08_INT_MODE_PUSH_PULL;
-
-        rslt = bmi08g_set_int_config(&gyro_int_config, bmi08dev);
-    }
-
-    if (rslt != BMI08_OK)
-    {
-//        printf("Failure in interrupt configurations \n");
-        return;
-    }
-}
-/*!
- * @brief This function converts lsb to meter per second squared for 16 bit accelerometer at
- * range 2G, 4G, 8G or 16G.
- */
-static float lsb_to_mps2(int16_t val, float g_range, uint8_t bit_width)
-{
-    double power = 2;
-
-    float half_scale = (float)((pow((double)power, (double)bit_width) / 2.0f));
-
-    return (GRAVITY_EARTH * val * g_range) / half_scale;
-}
-
-/*!
- * @brief This function converts lsb to degree per second for 16 bit gyro at
- * range 125, 250, 500, 1000 or 2000dps.
- */
-static float lsb_to_dps(int16_t val, float dps, uint8_t bit_width)
-{
-    double power = 2;
-
-    float half_scale = (float)((pow((double)power, (double)bit_width) / 2.0f));
-
-    return (dps / (half_scale)) * (val);
-}
 void IMU_data_init(IMU_data_t *imu_data_init)
 {
 	//初始化姿态解算相关变量
@@ -373,57 +210,36 @@ void IMU_data_init(IMU_data_t *imu_data_init)
 	imu_data_init->alpha=0.98;
 	imu_data_init->IMU_init_flag=false;
 }
-void offset_input(IMU_data_t *imu_data_offset)
-{  
-	//这里写入的是校准之后的零飘
-	imu_data_offset->accel_offset[0]=-154;//-301
-	imu_data_offset->accel_offset[1]=-38.5;//-207
-	imu_data_offset->accel_offset[2]=3.8;//-59
-	
-	imu_data_offset->gyro_offset[0]=11.5;//10.76
-	imu_data_offset->gyro_offset[1]=-9.8;//3.83
-	imu_data_offset->gyro_offset[2]=3.9;//1.47
-}
-
-void autooffset(IMU_data_t *imu_data_cail)
-{
-	//进行校准，陀螺仪用原始数据去零飘，加速度计减去5461.3，这个值根据带宽和量程计算得出，改变参数时需要改变这个值
-	//校准时，确保IMU的z方向竖直向下，
-	for(int i=0;i<1000;i++)
-	{
-  bmi088_mma_get_data(&bmi08_accel_offset, &bmi08);
-	bmi08g_get_data(&bmi08_gyro_offset, &bmi08);
-	imu_data_cail->accel_offset[0]+=bmi08_accel_offset.x;
-	imu_data_cail->accel_offset[1]+=bmi08_accel_offset.y;
-	imu_data_cail->accel_offset[2]+=bmi08_accel_offset.z;
-	imu_data_cail->gyro_offset[0]+=bmi08_gyro_offset.x;
-	imu_data_cail->gyro_offset[1]+=bmi08_gyro_offset.y;
-	imu_data_cail->gyro_offset[2]+=bmi08_gyro_offset.z;
-	HAL_Delay(10);
-	}
-	imu_data_cail->accel_offset[0]/=1000;
-	imu_data_cail->accel_offset[1]/=1000;
-	imu_data_cail->accel_offset[2]/=1000;
-	imu_data_cail->gyro_offset[0]/=1000;
-	imu_data_cail->gyro_offset[1]/=1000;
-	imu_data_cail->gyro_offset[2]/=1000;
-	imu_data_cail->accel_offset[2]-=5461.3;//这里需要减去一个重力加速度
-}
 void INS_task(void const *pvParameters)
-{   
+{
 	  vTaskDelay(1000);
-	  bmi08_interface_init(&bmi08, BMI08_SPI_INTF);//初始化bmi088为spi模式，同时提供stm32的spi和delay操作的api
-	  init_bmi08(&bmi08);
-      SPL06_Init(&spl06_inst, &hi2c2);
+
+	  /* 通信自检(两个 IMU 都测一遍,结果存 g_imu_selftest 供调试器查看) */
+	  imu_selftest_run();
+
+	  /* 统一抽象层:编译期选定的 IMU(见 bsp_config.h)初始化 + 起采集任务 */
+	  g_imu_init_ok = imu_init() ? 1U : 0U;
+	  imu_start();
+
+#if defined(IMU_CALIB_ON_BOOT)
+	  /* 实测零偏标定(需板子静止且水平,约 1s);结果存 g_imu_bias,
+	   * debug 时抄进 imu_calib.c 的写死表 */
+	  if (g_imu_init_ok) {
+	      imu_calib_run(IMU_CALIB_SAMPLES);
+	  }
+#else
+	  /* 不实测:用 imu_calib.c 里按芯片写死的零偏 */
+	  imu_calib_load_stored();
+#endif
+
+	  SPL06_Init(&spl06_inst, &hi2c2);
 	  IMU_data_init(&imu_data);
-	   //autooffset(&imu_data);//校准函数
-	  offset_input(&imu_data);//如果新板子需要校准这里要用校准函数，不使用这个函数
-      uint8_t baro_divider = 0;
+	  uint8_t baro_divider = 0;
 
 	  while (1)
     {
       baro_divider++;
-        if (baro_divider >= 20) 
+        if (baro_divider >= 20)
         {
             baro_divider = 0;
 
@@ -441,36 +257,25 @@ void INS_task(void const *pvParameters)
             // [B] 发起新一轮 DMA 读取 (瞬间完成)
             SPL06_Start_Read_DMA(&spl06_inst);
         }
-	  rslt = bmi088_mma_get_data(&bmi08_accel, &bmi08);
-      bmi08_check_rslt("bmi088_mma_get_data", rslt);
-	  imu_data.bmi08_accel_raw.x=bmi08_accel.x;//拷贝一份到自定义结构体里
-	  imu_data.bmi08_accel_raw.y=bmi08_accel.y;
-	  imu_data.bmi08_accel_raw.z=bmi08_accel.z;
-      INS_accel[0] = lsb_to_mps2(bmi08_accel.x-imu_data.accel_offset[0], (float)6, 16);
-      INS_accel[1] = lsb_to_mps2(bmi08_accel.y-imu_data.accel_offset[1], (float)6, 16);
-      INS_accel[2] = lsb_to_mps2(bmi08_accel.z-imu_data.accel_offset[2], (float)6, 16);
-	  imu_data.INS_accel[0]=lsb_to_mps2(bmi08_accel.x-imu_data.accel_offset[0], (float)6, 16);
-	  imu_data.INS_accel[1]=lsb_to_mps2(bmi08_accel.y-imu_data.accel_offset[1], (float)6, 16);
-	  imu_data.INS_accel[2]=lsb_to_mps2(bmi08_accel.z-imu_data.accel_offset[2], (float)6, 16);
-      rslt = bmi08g_get_data(&bmi08_gyro, &bmi08);
-      bmi08_check_rslt("bmi08g_get_data", rslt);
-	  imu_data.bmi08_gyro_raw.x=bmi08_gyro.x;//拷贝一份到自定义结构体里
-	  imu_data.bmi08_gyro_raw.y=bmi08_gyro.y;
-	  imu_data.bmi08_gyro_raw.z=bmi08_gyro.z;
-      INS_gyro[0] = lsb_to_dps((int16_t)(bmi08_gyro.x-imu_data.gyro_offset[0]), (float)1000, 16);
-      INS_gyro[1] = lsb_to_dps((int16_t)(bmi08_gyro.y-imu_data.gyro_offset[1]), (float)1000, 16);
-      INS_gyro[2] = lsb_to_dps((int16_t)(bmi08_gyro.z-imu_data.gyro_offset[2]), (float)1000, 16);
-      imu_data.INS_gyro[0]=lsb_to_dps((int16_t)(bmi08_gyro.x-imu_data.gyro_offset[0]), (float)1000, 16);
-	  imu_data.INS_gyro[1]=lsb_to_dps((int16_t)(bmi08_gyro.y-imu_data.gyro_offset[1]), (float)1000, 16);
-	  imu_data.INS_gyro[2]=lsb_to_dps((int16_t)(bmi08_gyro.z-imu_data.gyro_offset[2]), (float)1000, 16);
+
+      /* ── 取统一数据(机体系 rad/s、m/s²,与具体芯片解耦)── */
+      const ImuData *d = imu_get_data();
+      g_imu_live = *d;   /* 调试器观测 */
+
+      for (int i = 0; i < 3; ++i) {
+          INS_gyro[i]          = d->gyro[i];   /* rad/s */
+          INS_accel[i]         = d->accel[i];  /* m/s²  */
+          imu_data.INS_gyro[i] = d->gyro[i];
+          imu_data.INS_accel[i]= d->accel[i];
+      }
+
       attitude_update_madgwick(INS_gyro, INS_accel);
 	  imu_data.INS_angle[0]=g_yaw;
 	  imu_data.INS_angle[1]=g_pitch;
 	  imu_data.INS_angle[2]=g_roll;
-     
 
-
+      g_imu_loop_count++;
 		vTaskDelay(1);
 	}
-	
+
 }
