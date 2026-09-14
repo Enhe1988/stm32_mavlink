@@ -100,6 +100,7 @@ fp32 PID_Rate_Pitch[3] = {0.5f, 0.0f, 0.0f};  // Pitch角速度环PID
 /*****************************函数声明区*******************************/
 
 void aircraft_init(aircraft_control_t*init);//初始化函数
+static void aircraft_refresh_command_snapshot(aircraft_control_t *aircraft);
 void aricraft_behaviour_mode_set(aircraft_control_t*aircraft_mode_set);//模式切换判断函数
 void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl);//飞行控制函数
 
@@ -136,6 +137,7 @@ void Aircraft_ctrl_task(void const *pvParameters)
 	// 主控制循环
 	 while (1)
     {
+      aircraft_refresh_command_snapshot(&aircraft_control);
       aricraft_behaviour_mode_set(&aircraft_control);// 设置飞行模式
 			aricraft_fly_ctrl(&aircraft_control);          // 执行飞行控制
 			vTaskDelay(1);
@@ -146,9 +148,8 @@ void aircraft_init(aircraft_control_t*init)
 {
 	 init->aircraft_behaviour=Aircraft_ZERO_FORCE;      // 初始化为零力模式
 	 init->last_aircraft_behaviour=Aircraft_ZERO_FORCE;  // 记录上一个模式
-	 init->remote_data=get_remote_control_point();       // 获取遥控器数据指针
 	 init->IMU_data=get_imu_data_point();                // 获取IMU数据指针
-	 init->pc_data=get_pc_data_point();                  // 获取上位机数据指针
+	 aircraft_refresh_command_snapshot(init);
 	 init->left_motor_out=0;
 	 init->right_motor_out=0;
 	 init->roll_motor_out=0;
@@ -164,6 +165,20 @@ void aircraft_init(aircraft_control_t*init)
 	__HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_4, 1500); // 舵机回中
 
 }
+
+static void aircraft_refresh_command_snapshot(aircraft_control_t *aircraft)
+{
+    MavlinkRcSnapshot_t rc_snapshot;
+    MavlinkPcSnapshot_t pc_snapshot;
+
+    mavlink_rc_get_snapshot(&rc_snapshot);
+    mavlink_pc_get_snapshot(&pc_snapshot);
+
+    aircraft->remote_data = rc_snapshot.data;
+    aircraft->remote_update_ms = rc_snapshot.update_ms;
+    aircraft->remote_valid = rc_snapshot.valid;
+    aircraft->pc_data = pc_snapshot.data;
+}
 	/*************************模式切换函数*************************/
 
 void aricraft_behaviour_mode_set(aircraft_control_t*aircraft_mode_set)
@@ -174,27 +189,32 @@ void aricraft_behaviour_mode_set(aircraft_control_t*aircraft_mode_set)
 	这个判断条件也可以加上IMU，例如失控时转入Aircraft_ZERO_FORCE状态保护飞行器
 	或者遥控器断联时让飞行器停止
 	*/
-	if(aircraft_mode_set->remote_data->B==0 && aircraft_mode_set->remote_data->C==0) 
+	if ((!aircraft_mode_set->remote_valid) ||
+      ((HAL_GetTick() - aircraft_mode_set->remote_update_ms) > RC_LINK_TIMEOUT_MS))
+  {
+    aircraft_mode_set->aircraft_behaviour = Aircraft_ZERO_FORCE;
+  }
+	else if(aircraft_mode_set->remote_data.B==0 && aircraft_mode_set->remote_data.C==0)
  {
     aircraft_mode_set->aircraft_behaviour = Aircraft_ZERO_FORCE;
  }
-	else if(aircraft_mode_set->remote_data->B==2 && aircraft_mode_set->remote_data->C==0)
+	else if(aircraft_mode_set->remote_data.B==2 && aircraft_mode_set->remote_data.C==0)
  {
     aircraft_mode_set->aircraft_behaviour = Aircraft_RUN;//正常模式
  } 
-	else if(aircraft_mode_set->remote_data->E==2 && aircraft_mode_set->remote_data->B==0&&aircraft_mode_set->remote_data->C==0) 
+	else if(aircraft_mode_set->remote_data.E==2 && aircraft_mode_set->remote_data.B==0&&aircraft_mode_set->remote_data.C==0)
  {
     aircraft_mode_set->aircraft_behaviour = Aircraft_InRing_P;//yaw外环p
  } 
-  else if(aircraft_mode_set->remote_data->E==2 && aircraft_mode_set->remote_data->B==2&&aircraft_mode_set->remote_data->C==2)
+  else if(aircraft_mode_set->remote_data.E==2 && aircraft_mode_set->remote_data.B==2&&aircraft_mode_set->remote_data.C==2)
  {
     aircraft_mode_set->aircraft_behaviour = Aircraft_InRing_R;//pitch外环p
  } 
-  else if(aircraft_mode_set->remote_data->E==2 && aircraft_mode_set->remote_data->B==0 && aircraft_mode_set->remote_data->C==2) 
+  else if(aircraft_mode_set->remote_data.E==2 && aircraft_mode_set->remote_data.B==0 && aircraft_mode_set->remote_data.C==2)
  {
     aircraft_mode_set->aircraft_behaviour = Aircraft_OutRing_P;//roll 外环p
  } 
-  else if(aircraft_mode_set->remote_data->B==2 && aircraft_mode_set->remote_data->C==2) 
+  else if(aircraft_mode_set->remote_data.B==2 && aircraft_mode_set->remote_data.C==2)
  {
     aircraft_mode_set->aircraft_behaviour = Aircraft_Auto;//自动模式
  }
@@ -230,16 +250,16 @@ void Bias(aircraft_control_t*aircraft_fly_ctrl)
 {
     
     // 使用遥控器右摇杆调整Pitch1舵机偏置
-    if (aircraft_fly_ctrl->remote_data->Right_Y  <-50) {
+    if (aircraft_fly_ctrl->remote_data.Right_Y  <-50) {
         pitch_bias -=0.2;  // 下推减小偏置
-    } else if (aircraft_fly_ctrl->remote_data->Right_Y>50) {
+    } else if (aircraft_fly_ctrl->remote_data.Right_Y>50) {
         pitch_bias +=0.2;  // 上拉增加偏置
     }
     
     // 使用遥控器左摇杆调整基础油门偏置
-    if (aircraft_fly_ctrl->remote_data->Left_X  <-50) {
+    if (aircraft_fly_ctrl->remote_data.Left_X  <-50) {
         base_throttle -=0.2;  // 左摇减小偏置
-    } else if (aircraft_fly_ctrl->remote_data->Left_X>50) {
+    } else if (aircraft_fly_ctrl->remote_data.Left_X>50) {
         base_throttle +=0.2;  // 右摇增加偏置
     }
 }
@@ -268,9 +288,9 @@ void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl)
 	else if(aircraft_fly_ctrl->aircraft_behaviour==Aircraft_InRing_P)
 	{
 		// 如果遥控器F通道在位置2，用Left_Y调整Pitch角速度环Kp
-		if(aircraft_fly_ctrl->remote_data->F==2)
+		if(aircraft_fly_ctrl->remote_data.F==2)
 		{
-			PID_control_pitch.Kp=0.1*aircraft_fly_ctrl->remote_data->Left_Y;
+			PID_control_pitch.Kp=0.1*aircraft_fly_ctrl->remote_data.Left_Y;
 		
 		}
 		//Bias(&aircraft_control);       // 更新偏置
@@ -284,9 +304,9 @@ void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl)
 	                    //****pitch内环调试模式****//
   else if(aircraft_fly_ctrl->aircraft_behaviour==Aircraft_InRing_R)
 	{
-		if(aircraft_fly_ctrl->remote_data->F==2)
+		if(aircraft_fly_ctrl->remote_data.F==2)
 	{
-		PID_rate_pitch.Kp=0.05*aircraft_fly_ctrl->remote_data->Left_Y;
+		PID_rate_pitch.Kp=0.05*aircraft_fly_ctrl->remote_data.Left_Y;
 	}
 
 		//Bias(&aircraft_control);       // 更新偏置
@@ -298,9 +318,9 @@ void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl)
 								//****ROLL 内环P调试模式****//
 	else if(aircraft_fly_ctrl->aircraft_behaviour==Aircraft_OutRing_P)
 	{
-		if(aircraft_fly_ctrl->remote_data->F==2)
+		if(aircraft_fly_ctrl->remote_data.F==2)
 	{
-		PID_rate_roll.Kp = 0.05*aircraft_fly_ctrl->remote_data->Left_Y;
+		PID_rate_roll.Kp = 0.05*aircraft_fly_ctrl->remote_data.Left_Y;
     
     
 	}
@@ -316,9 +336,9 @@ void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl)
 	else if(aircraft_fly_ctrl->aircraft_behaviour==Aircraft_OutRing_R)
 	{
 
-		if(aircraft_fly_ctrl->remote_data->F==2)
+		if(aircraft_fly_ctrl->remote_data.F==2)
 	{
-		PID_control_roll.Kp =0.05*aircraft_fly_ctrl->remote_data->Left_Y;
+		PID_control_roll.Kp =0.05*aircraft_fly_ctrl->remote_data.Left_Y;
     
     
 	}	
@@ -328,9 +348,9 @@ void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl)
 	{
 		//自动模式下的处理逻辑
 		//自动模式下，使用上位机数据进行控制
-		yaw_PID_calc(&PID_control_yaw, aircraft_fly_ctrl->IMU_data->INS_angle[0], aircraft_fly_ctrl->pc_data->yaw);
-		PID_calc(&PID_control_roll, aircraft_fly_ctrl->IMU_data->INS_angle[2], aircraft_fly_ctrl->pc_data->roll);
-		PID_calc(&PID_control_pitch, aircraft_fly_ctrl->IMU_data->INS_angle[1], aircraft_fly_ctrl->pc_data->pitch);
+		yaw_PID_calc(&PID_control_yaw, aircraft_fly_ctrl->IMU_data->INS_angle[0], aircraft_fly_ctrl->pc_data.yaw);
+		PID_calc(&PID_control_roll, aircraft_fly_ctrl->IMU_data->INS_angle[2], aircraft_fly_ctrl->pc_data.roll);
+		PID_calc(&PID_control_pitch, aircraft_fly_ctrl->IMU_data->INS_angle[1], aircraft_fly_ctrl->pc_data.pitch);
 		//roll输出限幅
 	    aircraft_fly_ctrl->roll_motor_out=1500-PID_control_roll.out;
 		aircraft_fly_ctrl->roll_motor_out=num_limit(aircraft_fly_ctrl->roll_motor_out,1100,1900);		
@@ -344,7 +364,7 @@ void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl)
 		__HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_2, aircraft_fly_ctrl->left_motor_out);
 		__HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_3, aircraft_fly_ctrl->right_motor_out);
 		//油门控制
-		aircraft_fly_ctrl->power_motor_out = aircraft_fly_ctrl->pc_data->thrust*90;
+		aircraft_fly_ctrl->power_motor_out = aircraft_fly_ctrl->pc_data.thrust*90;
 		aircraft_fly_ctrl->power_motor_out = num_limit(aircraft_fly_ctrl->power_motor_out,0,900);
 		__HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_3, 1000+aircraft_fly_ctrl->power_motor_out);
 	    __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_4, 1000+aircraft_fly_ctrl->power_motor_out);
@@ -355,9 +375,9 @@ void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl)
 	{
 		//遥控死区限制
 		int Right_X =0,Right_Y=0,Left_X=0;
-		rc_deadband_limit(aircraft_fly_ctrl->remote_data->Right_X,Right_X,RC_DEADBAND);
-		rc_deadband_limit(aircraft_fly_ctrl->remote_data->Right_Y,Right_Y,RC_DEADBAND);
-		rc_deadband_limit(aircraft_fly_ctrl->remote_data->Left_X,Left_X,RC_DEADBAND);
+		rc_deadband_limit(aircraft_fly_ctrl->remote_data.Right_X,Right_X,RC_DEADBAND);
+		rc_deadband_limit(aircraft_fly_ctrl->remote_data.Right_Y,Right_Y,RC_DEADBAND);
+		rc_deadband_limit(aircraft_fly_ctrl->remote_data.Left_X,Left_X,RC_DEADBAND);
 		//yaw角度赋值
 		aircraft_fly_ctrl->yaw_set_angle=aircraft_fly_ctrl->yaw_set_angle+Left_X*0.0003;
 		//处理yaw角度在临界点跳变
@@ -397,7 +417,7 @@ void aricraft_fly_ctrl(aircraft_control_t*aircraft_fly_ctrl)
 		__HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_3, aircraft_fly_ctrl->right_motor_out);
 
 		//油门控制
-		aircraft_fly_ctrl->power_motor_out = aircraft_fly_ctrl->remote_data->Left_Y*9;
+		aircraft_fly_ctrl->power_motor_out = aircraft_fly_ctrl->remote_data.Left_Y*9;
 		aircraft_fly_ctrl->power_motor_out = num_limit(aircraft_fly_ctrl->power_motor_out,0,900);
 		__HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_3, 1000+aircraft_fly_ctrl->power_motor_out);
 	    __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_4, 1000+aircraft_fly_ctrl->power_motor_out);

@@ -1,6 +1,6 @@
 /**
  * @file    imu_selftest.cpp
- * @brief   IMU 通信自检实现。ICM 走 C++ 抽象驱动(官方驱动 init+who_am_i),
+ * @brief   IMU 通信自检实现。ICM 走自研最小驱动(init+WHO_AM_I),
  *          BMI088 走现有 Bosch C 驱动读 chip id。结果写入 g_imu_selftest。
  */
 #include "imu_selftest.h"
@@ -18,8 +18,8 @@ volatile imu_selftest_t g_imu_selftest = {0};
 
 static void icm_selftest(void)
 {
-    /* 仅通信自检:在真正 imu_init 之前用一个临时实例读 WHO_AM_I。
-     * 不起采集任务(避免与 imu_start 抢同一个 s_acq_task)。 */
+    /* 在真正 imu_init 之前用临时实例执行完整寄存器初始化与 WHO_AM_I 检查。
+     * 不调用 start()，不会创建解析任务或开放 DATA_RDY 中断。 */
     static Icm42688p icm;
     bool ok = icm.init();
     g_imu_selftest.icm_who_am_i = icm.whoAmI();

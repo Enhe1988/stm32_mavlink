@@ -30,7 +30,7 @@
 - **MAVLink 双口接收**：
   - USART3 — 遥控器（ELRS/MAVLink RC_CHANNELS_OVERRIDE）+ 上位机姿态指令（SET_ATTITUDE_TARGET）。
   - USART2 — 光流 + 测距模块（OPTICAL_FLOW_RAD + DISTANCE_SENSOR）。
-  - 接收链路基于 **DMA(circular) + IDLE 中断**，零拷贝、无环形缓冲中间层。
+  - 接收链路基于 **DMA(circular) + IDLE/HT/TC 中断 + 任务通知**，DMA 缓冲直接作为零拷贝环形区。
 - **串级 PID 控制**：Roll 双环（角度环 + 角速度环），Pitch/Yaw 单环；状态机切换飞行模式。
 - **气压计**：SPL06 经 I2C2 + DMA 读取（高度估计，解算逻辑待接入）。
 - **H743 Cache 一致性处理**：所有 DMA 缓冲集中放在 RAM_D2 的 MPU 非缓存区，规避 D-Cache 与 DMA 的数据一致性陷阱。
@@ -65,7 +65,6 @@
 │   mavlink_*           MAVLink 双口接收与派发               │
 ├──────────────────────────────────────────────────────────┤
 │ algorithm/     算法层                                      │
-│   MahonyAHRS / AHRS_middleware   姿态解算                  │
 │   pid                            位置式/串级 PID           │
 │   filter                         二阶低通滤波              │
 ├──────────────────────────────────────────────────────────┤
@@ -73,7 +72,6 @@
 │   imu/         IMU 抽象层(C++) + ICM/BMI 驱动 + 官方SDK    │
 │   spl06        气压计驱动                                  │
 │   bmi08*       Bosch BMI088 官方 C 驱动                    │
-│   ringbuffer   通用环形缓冲(MAVLink 重构后已不再使用)      │
 ├──────────────────────────────────────────────────────────┤
 │ Third_party/   MAVLink C 库(c_library_v2，common dialect) │
 │ Core/ Drivers/ Middlewares/   CubeMX 生成的 HAL/FreeRTOS  │
@@ -94,21 +92,18 @@ stm32_mavlink/
 │   ├── mavlink_flow.{c,h}          USART2 派发: 光流/测距 → OpticalFlow_Data_t
 │   └── mavlink_app.{c,h}           端口装配 + 初始化 + 解析任务 + 心跳/发送钩子
 ├── algorithm/                  算法
-│   ├── MahonyAHRS.{c,h} / AHRS_middleware.{c,h}
 │   ├── pid.{c,h}                   PID 控制器
 │   └── filter.{c,h}                二阶低通滤波
 ├── bsp/                        板级驱动
 │   ├── imu/                        IMU 抽象层(详见下文)
 │   ├── spl06.{c,h}                 SPL06 气压计(I2C+DMA)
 │   ├── bmi08*.{c,h}                Bosch BMI088 官方驱动
-│   ├── ringbuffer.{c,h}            通用环形缓冲
 │   └── bsp_config.h                编译期选型(IMU/放置/标定开关)
 ├── Third_party/mavlink_c/      MAVLink v2 C 库(common dialect)
 ├── Core/                       CubeMX: main / freertos / 外设初始化 / 中断
 ├── Drivers/                    STM32H7 HAL + CMSIS
 ├── Middlewares/                FreeRTOS + ARM DSP
 ├── cmake/                      工具链文件(gcc-arm-none-eabi.cmake)
-├── docs/IMU_Refactor_Design.md IMU 重构设计文档(实现规格)
 ├── 光流测距_串口数据协议说明.md  光流模块串口协议
 ├── CMakeLists.txt / CMakePresets.json
 ├── STM32H743XX_FLASH.ld        链接脚本(含 .dma_buffer 段)
@@ -140,7 +135,7 @@ stm32_mavlink/
 |------|------|--------|----|------|------|
 | INS | `INS_task` | High | 256 | 1ms | IMU 取数 + Madgwick 姿态解算 + 气压计(50Hz 分频) |
 | FLY_CTRL | `Aircraft_ctrl_task` | Normal | 256 | 1ms | 模式状态机 + 串级 PID + 电机/舵机输出 |
-| MAV_LINK | `mavlink_task` | Normal | 256 | 10ms | 轮询两个 MAVLink 端口 + 10ms 心跳 |
+| MAV_LINK | `mavlink_task` | AboveNormal | 256 | 事件驱动 | 等待 UART RX 通知并解析；超时唤醒维持 2Hz 测试发送 |
 | defaultTask | `StartDefaultTask` | Normal | 128 | 1ms | 空闲占位 |
 
 任务创建见 `Core/Src/freertos.c`。MAV_LINK 任务受 `CURRENT_RC_PROTOCOL == RC_PROTOCOL_MAVLINK` 编译期开关控制。
@@ -154,26 +149,28 @@ ICM-42688-P ──SPI4 中断+DMA──► imu_get_data() ─┐
                                                 ├─► INS_task ─Madgwick─► INS_angle ─┐
 气压计 SPL06 ──I2C2+DMA──────► (高度，待接入) ──┘                                  │
                                                                                     ▼
-遥控器/上位机 ─USART3─MAVLink─► get_remote_control_point() / get_pc_data_point() ─► Aircraft_ctrl_task
+遥控器/上位机 ─USART3─MAVLink─► 完整帧快照（RC / PC）───────────────────────────► Aircraft_ctrl_task
                                                                                     │  (状态机 + 串级PID)
 光流/测距 ────USART2─MAVLink─► get_optical_flow_point() (待接入控制)               ▼
                                                                           TIM3 电机 / TIM5 舵机
 ```
 
-数据在模块间通过 `const` 指针 getter 传递（单生产者单消费者，无锁）。
+IMU 与光流继续通过只读指针接口取最新数据；遥控和上位机指令按完整快照发布，飞控任务每轮原子复制一份本地数据，避免读到一帧更新到一半的混合值。
 
 ---
 
 ## MAVLink 接收子系统
 
-采用 **DMA(circular) + IDLE 中断** 方案（方案 A，无环形缓冲）。核心抽象 `MavlinkPort_t` 把"一条物理串口流"封装为一个端口实例，每个端口使用独立的 `mavlink_channel_t`，保证解析状态机互不污染。
+采用 **DMA(circular) + IDLE/HT/TC 中断 + FreeRTOS 任务通知**。核心抽象 `MavlinkPort_t` 把“一条物理串口流”封装为一个端口实例，每个端口使用独立的 `mavlink_channel_t`，保证解析状态机互不污染。
 
 | 端口 | 串口 | channel | 消息 | 产出 |
 |------|------|---------|------|------|
 | `g_rc_port` | USART3 | COMM_0 | RC_CHANNELS_OVERRIDE / SET_ATTITUDE_TARGET | `ELRS_Data` / `PC_Data_t` |
 | `g_flow_port` | USART2 | COMM_1 | OPTICAL_FLOW_RAD(106) / DISTANCE_SENSOR(132) | `OpticalFlow_Data_t` |
 
-**接收原理**：DMA 硬件循环写入非缓存缓冲区，软件维护读指针 `tail`，`head = buf_size - NDTR`。任务周期内把 `[tail, head)` 的新字节逐个喂给官方 `mavlink_parse_char`，缓冲靠 DMA 循环覆盖、无需清除。详见 `mavlink_port.c` 注释。
+**接收原理**：DMA 硬件持续循环写入非缓存缓冲区。IDLE 用于短帧或帧间空闲时的低延迟唤醒，HT/TC 保证连续字节流即使没有空闲也能定期唤醒；TC 同时累计 DMA 回绕次数。中断只记录事件并通知任务，任务根据 `回绕次数 × 缓冲大小 + (缓冲大小 - NDTR)` 算出累计生产量，再从软件读指针 `tail` 排空新字节并逐个喂给 `mavlink_parse_char`。若任务落后超过一整圈，会统计覆盖字节并重置残帧解析状态。
+
+USART3 缓冲为 1024B，USART2 缓冲为 256B，均位于 RAM_D2 的 `.dma_buffer` 非缓存区。遥控帧发布时携带 `update_ms` 和 `frame_count`；超过 `RC_LINK_TIMEOUT_MS`（当前 100ms）没有新遥控帧，飞控状态机会进入 `Aircraft_ZERO_FORCE`。周期发送不再依赖解析循环次数，而是使用 500ms 的绝对截止时间，因此 RX 通知频率不会改变 2Hz 发送节拍。
 
 光流模块协议（来自 AT32F421，50Hz 成对发送）详见 [`光流测距_串口数据协议说明.md`](光流测距_串口数据协议说明.md)。
 
@@ -187,15 +184,17 @@ ICM-42688-P ──SPI4 中断+DMA──► imu_get_data() ─┐
 |------|------|
 | `imu_api.{h,cpp}` | 对外 C 接口：`imu_init` / `imu_start` / `imu_get_data`，统一数据 `ImuData`（rad/s, m/s²）+ 编译期选型 |
 | `imu.hpp` | `ImuDriver` 抽象基类 |
-| `Icm42688p.{hpp,cpp}` | ICM-42688-P 驱动（SPI4 EXTI+DMA，封装官方 Icm426xx eMD 驱动） |
+| `Icm42688p.{hpp,cpp}` | ICM-42688-P 自研最小驱动（阻塞初始化；DRDY→SPI4 DMA→解析任务） |
+| `icm42688p_regs.h` | 本工程使用的 ICM-42688-P 寄存器和配置位 |
 | `Bmi088.{hpp,cpp}` | BMI088 驱动（SPI1 轮询，封装 Bosch C 驱动） |
 | `icm_platform.{c,h}` | 平台服务：DWT 微秒计时 + MPU 非缓存区配置 |
 | `imu_frame.{c,h}` / `imu_orientation.h` | 传感器系 → 机体系旋转映射（机体系：X前/Y右/Z下） |
 | `imu_calib.{c,h}` | 零偏标定（上电实测或写死值） |
 | `imu_selftest.{cpp,h}` | 双芯片通信自检（POST） |
-| `icm426xx_sdk/` | InvenSense 官方 Icm426xx 驱动（最小集） |
 
-切换 IMU 只需改 `bsp/bsp_config.h` 一行 `#define`，上层无感知。完整设计规格见 [`docs/IMU_Refactor_Design.md`](docs/IMU_Refactor_Design.md)。
+切换 IMU 只需改 `bsp/bsp_config.h` 一行 `#define`，上层无感知。当前接口与配置以 `bsp/imu/` 的实现为准。
+
+ICM 运行期链路为：`PE15 DRDY ISR → 启动 15 字节 SPI4 TxRx DMA → DMA 完成 ISR → 一次任务通知 → 解析/换算/标定 → 双缓冲发布`。DRDY ISR 不再先唤醒采集任务，也不在中断中做浮点运算。
 
 ---
 
@@ -217,7 +216,6 @@ ICM-42688-P ──SPI4 中断+DMA──► imu_get_data() ─┐
 其他：
 - `Core/Inc/main.h` — `CURRENT_RC_PROTOCOL`（MAVLink / CRSF）。
 - `application/mavlink_app.h` — `MAVLINK_FLOW_PORT_ENABLE`（光流口开关）。
-- `CMakeLists.txt` — `ICM42688P` 宏（官方驱动量程/ODR 选择）。
 
 ---
 
@@ -241,7 +239,7 @@ cmake --build build/Debug      # 产物: build/Debug/fly_control_stm.elf
 
 ## 已知问题与待办
 
-- **ICM 板上旋转未标定**：`Icm42688p` 驱动当前输出芯片原始轴，姿态角可能不对，需实测各轴朝向后在驱动里补旋转矩阵。BMI088 的旋转已标定（沿用原映射，可飞）。
+- **IMU 轴映射需随硬件复核**：ICM 与 BMI088 的当前映射集中在 `bsp/imu/imu_frame.c`，换板或改安装方向后需重新验证。
 - **光流数据未接入控制**：`get_optical_flow_point()` 已可取到 `range_cm` / `flow_x_rad` 等，尚未接入 `Aircraft_ctrl_task` 做定高/水平速度控制。
 - **气压计高度未接入**：SPL06 已读取，解算高度尚未写入 INS 数据结构供控制使用。
 - **加速度零偏/温补、IMU 温度读取**等为可选优化项（BMI088 温度暂填 0）。
@@ -254,7 +252,7 @@ cmake --build build/Debug      # 产物: build/Debug/fly_control_stm.elf
 - **MAVLink**：c_library_v2（common dialect），见 `Third_party/mavlink_c/`。
 - **FreeRTOS** + **CMSIS-RTOS v1**。
 - **CMSIS-DSP**（ARM Math）。
-- **InvenSense Icm426xx eMD 驱动** + **Bosch BMI08x 驱动**。
+- **Bosch BMI08x 驱动**；ICM-42688-P 由本工程按数据手册直接驱动。
 
 ---
 

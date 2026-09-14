@@ -62,15 +62,31 @@ typedef struct
 
 } PC_Data_t;//来自PC的数据
 
-/**
-  * @brief  获取遥控器数据指针
-  */
-const ELRS_Data *get_remote_control_point(void);
+typedef struct
+{
+    ELRS_Data data;
+    uint32_t update_ms;
+    uint32_t frame_count;
+    uint8_t valid;
+} MavlinkRcSnapshot_t;
+
+typedef struct
+{
+    PC_Data_t data;
+    uint32_t update_ms;
+    uint32_t frame_count;
+    uint8_t valid;
+} MavlinkPcSnapshot_t;
 
 /**
-  * @brief  获取上位机数据指针
+  * @brief  原子复制最新的完整遥控帧和更新时间。
   */
-const PC_Data_t *get_pc_data_point(void);
+void mavlink_rc_get_snapshot(MavlinkRcSnapshot_t *out);
+
+/**
+  * @brief  原子复制最新的完整上位机姿态目标和更新时间。
+  */
+void mavlink_pc_get_snapshot(MavlinkPcSnapshot_t *out);
 
 /**
   * @brief  COMM_0(USART3)整帧派发:RC_CHANNELS_OVERRIDE / SET_ATTITUDE_TARGET。

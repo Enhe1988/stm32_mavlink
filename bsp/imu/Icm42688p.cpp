@@ -1,132 +1,86 @@
 /**
  * @file    Icm42688p.cpp
- * @brief   ICM-42688-P 驱动实现。
- *          阶段(设计文档 §10 第3步):阻塞版 serif(HAL_SPI_TransmitReceive)
- *          + 官方 inv_icm426xx_init + get_who_am_i 自检(读 0x47)。
- *          DMA 后端 / EXTI 采集任务为后续步骤。
+ * @brief   ICM-42688-P 自研最小驱动。
+ *
+ * 初始化阶段使用阻塞 SPI 完成复位、身份检查和寄存器配置。运行阶段由
+ * PE15 DATA_RDY 中断直接启动一次 15 字节 SPI4 TxRx DMA；DMA 完成中断
+ * 关闭片选并通知解析任务。解析、单位换算、轴映射和发布均在任务上下文。
  */
 #include "Icm42688p.hpp"
+#include "icm42688p_regs.h"
 #include "icm_platform.h"
-#include "imu_orientation.h"
-#include "imu_frame.h"
 #include "imu_calib.h"
+#include "imu_frame.h"
+#include "imu_orientation.h"
+
+#include <limits.h>
 
 extern "C" {
-#include "main.h"   // ICM_CS_Pin / ICM_CS_GPIO_Port
-#include "spi.h"    // hspi4
 #include "FreeRTOS.h"
-#include "semphr.h"
+#include "main.h"
+#include "spi.h"
 #include "task.h"
 }
 
-/* 单次 SPI 传输的最大数据字节数(不含地址字节)。寄存器模式下读写都很小。 */
-#define ICM_SPI_MAX_XFER 32U
-#define ICM_SPI_TIMEOUT  100U   /* ms */
+using namespace icm42688p_reg;
 
-/* ── 量程标定常数(与 init 里设的 FSR 一致)──
- * ±16g  → 2048 LSB/g ;  ±2000dps → 16.4 LSB/dps ; 温度 raw/132.48 + 25 */
-#define ICM_ACCEL_LSB_PER_G   2048.0f
-#define ICM_GYRO_LSB_PER_DPS  16.4f
-#define ICM_G_TO_MPS2         9.80665f
-#define ICM_DPS_TO_RADS       0.017453292519943295f   /* π/180 */
-#define ICM_TEMP_SENS         132.48f
-#define ICM_TEMP_OFFSET_C     25.0f
+namespace {
 
-/* sensorEventCb 是无 context 的 C 回调,用文件作用域指针指回当前实例。
- * 实际只有一个 ICM,init() 里赋值即可。 */
-static Icm42688p *s_icm_self = nullptr;
+constexpr uint32_t SPI_TIMEOUT_MS = 100U;
+constexpr uint32_t RESET_SETTLE_US = 2000U;
+constexpr uint32_t GYRO_STARTUP_US = 60000U;
+constexpr uint32_t RESET_POLL_US = 100U;
+constexpr uint32_t RESET_POLL_COUNT = 100U;
 
-/* ── SPI4 DMA 后端(设计文档 §3/§5)──
- * buffer 放 .dma_buffer(RAM_D2,MPU 非缓存);read/write 启 DMA 后阻塞等完成信号量。 */
+constexpr float ACCEL_LSB_PER_G = 2048.0f;
+constexpr float GYRO_LSB_PER_DPS = 16.4f;
+constexpr float GRAVITY_MPS2 = 9.80665f;
+constexpr float DEG_TO_RAD = 0.017453292519943295f;
+constexpr float TEMP_SENSITIVITY = 132.48f;
+constexpr float TEMP_OFFSET_C = 25.0f;
+
+enum RawBufferState : uint8_t {
+    RAW_FREE = 0U,
+    RAW_DMA,
+    RAW_READY,
+    RAW_PROCESSING,
+};
+
+Icm42688p *s_icm = nullptr;
+TaskHandle_t s_parse_task = nullptr;
+
+/* SPI4 DMA 只能访问 RAM_D2；该段由 icm_platform_dma_region_init 配成非缓存。 */
 __attribute__((section(".dma_buffer"), aligned(32)))
-static uint8_t s_dma_tx[1 + ICM_SPI_MAX_XFER];
+uint8_t s_dma_tx[SPI_FRAME_BYTES] = {0U};
+
 __attribute__((section(".dma_buffer"), aligned(32)))
-static uint8_t s_dma_rx[1 + ICM_SPI_MAX_XFER];
+uint8_t s_dma_rx[2][SPI_FRAME_BYTES] = {{0U}};
 
-static SemaphoreHandle_t s_spi_dma_done = nullptr;   /* 单次 DMA 传输完成 */
-static TaskHandle_t      s_acq_task     = nullptr;   /* DRDY 驱动的采集任务 */
+volatile RawBufferState s_raw_state[2] = {RAW_FREE, RAW_FREE};
+volatile bool s_dma_busy = false;
+volatile uint8_t s_dma_index = 0U;
+uint32_t s_raw_timestamp_us[2] = {0U, 0U};
 
-/* ── serif 总线读写(C 语言链接,可赋给官方驱动的 C 函数指针)── */
-extern "C" {
-
-static inline void icm_cs_low(void)
+inline void chipSelectLow()
 {
     HAL_GPIO_WritePin(ICM_CS_GPIO_Port, ICM_CS_Pin, GPIO_PIN_RESET);
 }
-static inline void icm_cs_high(void)
+
+inline void chipSelectHigh()
 {
     HAL_GPIO_WritePin(ICM_CS_GPIO_Port, ICM_CS_Pin, GPIO_PIN_SET);
 }
 
-/* 等单次 DMA 传输完成信号量(在任务上下文调用)。超时返回 false。 */
-static bool icm_wait_dma_done(void)
+inline int16_t decodeBigEndian(const uint8_t *p)
 {
-    return (xSemaphoreTake(s_spi_dma_done, pdMS_TO_TICKS(ICM_SPI_TIMEOUT)) == pdTRUE);
+    return static_cast<int16_t>((static_cast<uint16_t>(p[0]) << 8U) |
+                                static_cast<uint16_t>(p[1]));
 }
 
-/* 读:发送 (reg|0x80) 后读 len 字节。total = len+1。走 DMA + 完成信号量。 */
-static int icm_serif_read_reg(struct inv_icm426xx_serif * /*serif*/, uint8_t reg,
-                              uint8_t *buf, uint32_t len)
-{
-    if (len > ICM_SPI_MAX_XFER) {
-        return -1;
-    }
-    s_dma_tx[0] = (uint8_t)(reg | 0x80U);
-    for (uint32_t i = 0; i < len; ++i) {
-        s_dma_tx[i + 1] = 0;
-    }
+} /* namespace */
 
-    icm_cs_low();
-    if (HAL_SPI_TransmitReceive_DMA(&hspi4, s_dma_tx, s_dma_rx, (uint16_t)(len + 1)) != HAL_OK ||
-        !icm_wait_dma_done()) {
-        icm_cs_high();
-        return -1;
-    }
-    icm_cs_high();
+extern "C" {
 
-    for (uint32_t i = 0; i < len; ++i) {
-        buf[i] = s_dma_rx[i + 1];   /* RAM_D2 非缓存,直接读即最新 DMA 结果 */
-    }
-    return 0;
-}
-
-/* 写:发送 reg 后写 len 字节。total = len+1。走 DMA + 完成信号量。 */
-static int icm_serif_write_reg(struct inv_icm426xx_serif * /*serif*/, uint8_t reg,
-                               const uint8_t *buf, uint32_t len)
-{
-    if (len > ICM_SPI_MAX_XFER) {
-        return -1;
-    }
-    s_dma_tx[0] = reg;
-    for (uint32_t i = 0; i < len; ++i) {
-        s_dma_tx[i + 1] = buf[i];
-    }
-
-    icm_cs_low();
-    if (HAL_SPI_Transmit_DMA(&hspi4, s_dma_tx, (uint16_t)(len + 1)) != HAL_OK ||
-        !icm_wait_dma_done()) {
-        icm_cs_high();
-        return -1;
-    }
-    icm_cs_high();
-    return 0;
-}
-
-/* ── HAL DMA 完成回调:按 Instance 分发(BMI088 走 SPI1 阻塞,不进这里)── */
-void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *h)
-{
-    if (h->Instance == SPI4) {
-        Icm42688p::onSpiDmaDoneISR();
-    }
-}
-void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *h)
-{
-    if (h->Instance == SPI4) {
-        Icm42688p::onSpiDmaDoneISR();
-    }
-}
-
-/* ── EXTI 回调:PE15(ICM DRDY)→ 通知采集任务 ── */
 void HAL_GPIO_EXTI_Callback(uint16_t pin)
 {
     if (pin == ICM_INT_Pin) {
@@ -134,144 +88,397 @@ void HAL_GPIO_EXTI_Callback(uint16_t pin)
     }
 }
 
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *spi)
+{
+    if (spi->Instance == SPI4) {
+        Icm42688p::onSpiDmaDoneISR();
+    }
+}
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *spi)
+{
+    if (spi->Instance == SPI4) {
+        Icm42688p::onSpiErrorISR();
+    }
+}
+
 } /* extern "C" */
 
-bool Icm42688p::init()
+const ImuData &Icm42688p::getData() const
 {
-    icm_platform_timer_init();
-    icm_platform_dma_region_init();   /* DMA buffer 区配非缓存(用 DMA 前) */
-    s_icm_self = this;
+    const uint8_t index = published_index_;
+    __DMB();
+    return data_[index];
+}
 
-    /* 单次 DMA 完成信号量(只建一次) */
-    if (s_spi_dma_done == nullptr) {
-        s_spi_dma_done = xSemaphoreCreateBinary();
-        if (s_spi_dma_done == nullptr) {
+bool Icm42688p::readRegisters(uint8_t reg, uint8_t *data, uint16_t length)
+{
+    if ((data == nullptr) || (length == 0U) || (length > SENSOR_DATA_BYTES)) {
+        return false;
+    }
+
+    uint8_t tx[SPI_FRAME_BYTES] = {0U};
+    uint8_t rx[SPI_FRAME_BYTES] = {0U};
+    tx[0] = static_cast<uint8_t>(reg | READ_BIT);
+
+    chipSelectLow();
+    const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+        &hspi4, tx, rx, static_cast<uint16_t>(length + 1U), SPI_TIMEOUT_MS);
+    chipSelectHigh();
+
+    if (status != HAL_OK) {
+        return false;
+    }
+
+    for (uint16_t i = 0U; i < length; ++i) {
+        data[i] = rx[i + 1U];
+    }
+    return true;
+}
+
+bool Icm42688p::writeRegister(uint8_t reg, uint8_t value)
+{
+    uint8_t tx[2] = {reg, value};
+    chipSelectLow();
+    const HAL_StatusTypeDef status =
+        HAL_SPI_Transmit(&hspi4, tx, sizeof(tx), SPI_TIMEOUT_MS);
+    chipSelectHigh();
+    return status == HAL_OK;
+}
+
+bool Icm42688p::selectBank(uint8_t bank)
+{
+    return writeRegister(REG_BANK_SEL, static_cast<uint8_t>(bank & 0x07U));
+}
+
+bool Icm42688p::verifyRegister(uint8_t reg, uint8_t expected, uint8_t mask)
+{
+    uint8_t value = 0U;
+    return readRegisters(reg, &value, 1U) &&
+           ((value & mask) == (expected & mask));
+}
+
+bool Icm42688p::configure()
+{
+    if (!selectBank(BANK0) ||
+        !writeRegister(DEVICE_CONFIG, DEVICE_CONFIG_SOFT_RESET)) {
+        init_rc_ = INIT_SPI_ERROR;
+        return false;
+    }
+
+    icm_platform_delay_us(RESET_SETTLE_US);
+
+    bool reset_done = false;
+    for (uint32_t i = 0U; i < RESET_POLL_COUNT; ++i) {
+        uint8_t status = 0U;
+        if (!readRegisters(INT_STATUS, &status, 1U)) {
+            init_rc_ = INIT_SPI_ERROR;
+            return false;
+        }
+        if ((status & INT_STATUS_RESET_DONE) != 0U) {
+            reset_done = true;
+            break;
+        }
+        icm_platform_delay_us(RESET_POLL_US);
+    }
+    if (!reset_done) {
+        init_rc_ = INIT_RESET_TIMEOUT;
+        return false;
+    }
+
+    if (!readRegisters(WHO_AM_I, &who_am_i_, 1U)) {
+        init_rc_ = INIT_SPI_ERROR;
+        return false;
+    }
+    if (who_am_i_ != WHO_AM_I_VALUE) {
+        init_rc_ = INIT_WHO_AM_I_ERROR;
+        return false;
+    }
+
+    /* 手册“Settings for SPI”建议：4-wire SPI，并保持 I3C 能力位为 1。 */
+    uint8_t intf_config4 = 0U;
+    uint8_t intf_config6 = 0U;
+    if (!selectBank(BANK1) ||
+        !readRegisters(INTF_CONFIG4, &intf_config4, 1U) ||
+        !readRegisters(INTF_CONFIG6, &intf_config6, 1U)) {
+        init_rc_ = INIT_SPI_ERROR;
+        return false;
+    }
+    intf_config4 = static_cast<uint8_t>(
+        (intf_config4 & ~INTF_CONFIG4_I3C_BUS_MODE) | INTF_CONFIG4_SPI_4WIRE);
+    intf_config6 = static_cast<uint8_t>(
+        intf_config6 | INTF_CONFIG6_I3C_EN |
+        INTF_CONFIG6_I3C_DDR_EN | INTF_CONFIG6_I3C_SDR_EN);
+    if (!writeRegister(INTF_CONFIG4, intf_config4) ||
+        !writeRegister(INTF_CONFIG6, intf_config6) ||
+        !selectBank(BANK0)) {
+        init_rc_ = INIT_SPI_ERROR;
+        return false;
+    }
+
+    /* 先配置接口、量程、ODR、滤波与中断，最后才开启两个传感器。 */
+    const struct {
+        uint8_t reg;
+        uint8_t value;
+    } config[] = {
+        {DRIVE_CONFIG,       DRIVE_CONFIG_SPI_SLEW_5},
+        {INTF_CONFIG0,       INTF_CONFIG0_SPI_ONLY},
+        {FIFO_CONFIG,        0x00U},
+        {INT_CONFIG,         INT_CONFIG_INT1},
+        {INT_CONFIG0,        0x00U},
+        {INT_CONFIG1,        0x00U}, /* 清 INT_ASYNC_RESET，INT 引脚才能正常工作 */
+        {INT_SOURCE0,        0x00U}, /* start() 创建解析任务后再开放 DATA_RDY */
+        {GYRO_CONFIG0,       GYRO_CONFIG0_2000DPS_1KHZ},
+        {ACCEL_CONFIG0,      ACCEL_CONFIG0_16G_1KHZ},
+        {GYRO_ACCEL_CONFIG0, GYRO_ACCEL_CONFIG0_DEFAULT},
+    };
+
+    for (const auto &entry : config) {
+        if (!writeRegister(entry.reg, entry.value)) {
+            init_rc_ = INIT_SPI_ERROR;
             return false;
         }
     }
 
-    /* CS 空闲拉高 */
-    icm_cs_high();
-
-    /* 配置 serif */
-    serif_.context    = this;
-    serif_.read_reg   = icm_serif_read_reg;
-    serif_.write_reg  = icm_serif_write_reg;
-    serif_.configure  = nullptr;            /* SPI4 路径不会被调用 */
-    serif_.max_read   = ICM_SPI_MAX_XFER;
-    serif_.max_write  = ICM_SPI_MAX_XFER;
-    serif_.serif_type = ICM426XX_UI_SPI4;
-
-    /* 官方 init(内部含上电延时 + 串口配置 + 硬件默认配置) */
-    init_rc_ = inv_icm426xx_init(&drv_, &serif_, &Icm42688p::sensorEventCb);
-
-    /* 读 WHO_AM_I 校验通信(期望 0x47) */
-    who_am_i_ = 0;
-    inv_icm426xx_get_who_am_i(&drv_, &who_am_i_);
-    if (who_am_i_ != 0x47) {
+    if (!writeRegister(PWR_MGMT0, PWR_MGMT0_ACCEL_GYRO_LN)) {
+        init_rc_ = INIT_SPI_ERROR;
         return false;
     }
 
-    /* ── 数据源配置(寄存器模式,非 FIFO)── */
-    inv_icm426xx_configure_fifo(&drv_, INV_ICM426XX_FIFO_DISABLED);
-    inv_icm426xx_set_accel_fsr(&drv_, ICM426XX_ACCEL_CONFIG0_FS_SEL_16g);
-    inv_icm426xx_set_gyro_fsr(&drv_, ICM426XX_GYRO_CONFIG0_FS_SEL_2000dps);
-    inv_icm426xx_set_accel_frequency(&drv_, ICM426XX_ACCEL_CONFIG0_ODR_1_KHZ);
-    inv_icm426xx_set_gyro_frequency(&drv_, ICM426XX_GYRO_CONFIG0_ODR_1_KHZ);
-    inv_icm426xx_enable_accel_low_noise_mode(&drv_);
-    inv_icm426xx_enable_gyro_low_noise_mode(&drv_);
+    /* PWR_MGMT0 后至少 200 us 不可访问寄存器；60 ms 同时覆盖陀螺启动。 */
+    icm_platform_delay_us(GYRO_STARTUP_US);
 
-    /* 陀螺/加速度上电后需稳定时间(手册:陀螺 ~60ms),首批样本应丢弃。
-     * 这里阻塞等到陀螺启动完成,调用方拿到的首帧即有效。 */
-    inv_icm426xx_sleep_us(ICM426XX_GYR_STARTUP_TIME_US);
+    if (!verifyRegister(WHO_AM_I, WHO_AM_I_VALUE, 0xFFU) ||
+        !verifyRegister(INTF_CONFIG0, INTF_CONFIG0_SPI_ONLY, 0x33U) ||
+        !verifyRegister(INT_CONFIG, INT_CONFIG_INT1, 0x07U) ||
+        !verifyRegister(INT_CONFIG1, 0x00U, 0x10U) ||
+        !verifyRegister(GYRO_CONFIG0, GYRO_CONFIG0_2000DPS_1KHZ, 0xEFU) ||
+        !verifyRegister(ACCEL_CONFIG0, ACCEL_CONFIG0_16G_1KHZ, 0xEFU) ||
+        !verifyRegister(PWR_MGMT0, PWR_MGMT0_ACCEL_GYRO_LN, 0x3FU)) {
+        init_rc_ = INIT_CONFIG_ERROR;
+        return false;
+    }
 
+    init_rc_ = INIT_OK;
     return true;
+}
+
+bool Icm42688p::init()
+{
+    icm_platform_timer_init();
+    icm_platform_dma_region_init();
+
+    s_icm = this;
+    started_ = false;
+    published_index_ = 0U;
+    data_[0] = {};
+    data_[1] = {};
+    who_am_i_ = 0U;
+    init_rc_ = INIT_OK;
+    sample_count_ = 0U;
+    drdy_count_ = 0U;
+    missed_drdy_count_ = 0U;
+    dma_start_error_count_ = 0U;
+    spi_error_count_ = 0U;
+    invalid_sample_count_ = 0U;
+
+    s_dma_busy = false;
+    s_dma_index = 0U;
+    s_raw_state[0] = RAW_FREE;
+    s_raw_state[1] = RAW_FREE;
+    s_dma_tx[0] = static_cast<uint8_t>(TEMP_DATA1 | READ_BIT);
+    for (uint8_t i = 1U; i < SPI_FRAME_BYTES; ++i) {
+        s_dma_tx[i] = 0U;
+    }
+
+    chipSelectHigh();
+    icm_platform_delay_us(3000U);
+    return configure();
 }
 
 void Icm42688p::start()
 {
-    /* 把 DRDY 路由到 INT1(官方 init 默认未路由到 INT1)。
-     * 电气(推挽/高有效/脉冲)已由 inv_icm426xx_init 配好。 */
-    inv_icm426xx_interrupt_parameter_t int1 = {};   /* 全部字段 = DISABLE */
-    int1.INV_ICM426XX_UI_DRDY = INV_ICM426XX_ENABLE;
-    inv_icm426xx_set_config_int1(&drv_, &int1);
-
-    /* 起采集任务;PE15 EXTI 已由 CubeMX 在 gpio.c 使能 */
-    if (s_acq_task == nullptr) {
-        xTaskCreate(&Icm42688p::acqTaskTramp, "icm_acq", 384, this,
-                    configMAX_PRIORITIES - 1, &s_acq_task);
-    }
-}
-
-void Icm42688p::acqTaskTramp(void *arg)
-{
-    static_cast<Icm42688p *>(arg)->acqTask();
-}
-
-void Icm42688p::acqTask()
-{
-    for (;;) {
-        /* 阻塞等 DRDY 通知(EXTI→onDrdyISR)。只在收到中断时读,
-         * 这样 sample_count_ 的增长本身即证明 EXTI 链路工作。 */
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        inv_icm426xx_get_data_from_registers(&drv_);   /* → sensorEventCb 填 data_ */
-    }
-}
-
-int Icm42688p::poll()
-{
-    /* 同步读数据寄存器;官方驱动内部对每帧调用 sensorEventCb 填 data_ */
-    return inv_icm426xx_get_data_from_registers(&drv_);
-}
-
-void Icm42688p::sensorEventCb(inv_icm426xx_sensor_event_t *event)
-{
-    if (s_icm_self == nullptr || event == nullptr) {
+    if ((init_rc_ != INIT_OK) || started_) {
         return;
     }
-    ImuData &d = s_icm_self->data_;
 
-    /* ① 芯片系物理量(raw int16 → m/s² / rad/s)。寄存器读时三者都有效。 */
-    float a[3];   /* 加速度 m/s²,芯片轴 */
-    float g[3];   /* 角速度 rad/s,芯片轴 */
-    for (int i = 0; i < 3; ++i) {
-        a[i] = (float)event->accel[i] / ICM_ACCEL_LSB_PER_G * ICM_G_TO_MPS2;
-        g[i] = (float)event->gyro[i]  / ICM_GYRO_LSB_PER_DPS * ICM_DPS_TO_RADS;
+    if (s_parse_task == nullptr) {
+        if (xTaskCreate(&Icm42688p::parseTaskTramp, "icm_parse", 384U, this,
+                        configMAX_PRIORITIES - 1U, &s_parse_task) != pdPASS) {
+            init_rc_ = INIT_TASK_ERROR;
+            return;
+        }
     }
 
-    /* ② 传感器系 → 机体系(统一映射,标定改 imu_frame.c) */
-    imu_axis_apply(&IMU_MAP_ICM_ACCEL, a);
-    imu_axis_apply(&IMU_MAP_ICM_GYRO,  g);
-    d.accel[0] = a[0]; d.accel[1] = a[1]; d.accel[2] = a[2];
-    d.gyro[0]  = g[0]; d.gyro[1]  = g[1]; d.gyro[2]  = g[2];
+    __HAL_GPIO_EXTI_CLEAR_IT(ICM_INT_Pin);
+    if (!selectBank(BANK0) ||
+        !writeRegister(INT_SOURCE0, INT_SOURCE0_UI_DRDY)) {
+        init_rc_ = INIT_SPI_ERROR;
+        return;
+    }
+    __HAL_GPIO_EXTI_CLEAR_IT(ICM_INT_Pin);
+    started_ = true;
+}
 
-    d.temp      = (float)event->temperature / ICM_TEMP_SENS + ICM_TEMP_OFFSET_C;
-    d.timestamp = (uint32_t)inv_icm426xx_get_time_us();
+void Icm42688p::parseTaskTramp(void *arg)
+{
+    static_cast<Icm42688p *>(arg)->parseTask();
+}
 
-    /* ③ 板子系零偏扣除(放置旋转之前,与平放/竖放无关;未标定时不动) */
-    imu_calib_apply(d.gyro, d.accel);
+void Icm42688p::parseTask()
+{
+    for (;;) {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    /* ④ 板子放置旋转(平放=恒等;竖放见 imu_orientation.h) */
-    imu_orient_apply(d.gyro);
-    imu_orient_apply(d.accel);
+        /* 通知只负责唤醒；一次醒来把所有 READY 缓冲都处理完。 */
+        for (;;) {
+            int index = -1;
+            taskENTER_CRITICAL();
+            for (int i = 0; i < 2; ++i) {
+                if (s_raw_state[i] == RAW_READY) {
+                    s_raw_state[i] = RAW_PROCESSING;
+                    index = i;
+                    break;
+                }
+            }
+            taskEXIT_CRITICAL();
 
-    s_icm_self->sample_count_++;
+            if (index < 0) {
+                break;
+            }
+
+            (void)parseAndPublish(&s_dma_rx[index][1], s_raw_timestamp_us[index]);
+
+            taskENTER_CRITICAL();
+            s_raw_state[index] = RAW_FREE;
+            taskEXIT_CRITICAL();
+        }
+    }
+}
+
+bool Icm42688p::parseAndPublish(const uint8_t *sample, uint32_t timestamp_us)
+{
+    const int16_t temp_raw = decodeBigEndian(&sample[0]);
+    const int16_t accel_raw[3] = {
+        decodeBigEndian(&sample[2]),
+        decodeBigEndian(&sample[4]),
+        decodeBigEndian(&sample[6]),
+    };
+    const int16_t gyro_raw[3] = {
+        decodeBigEndian(&sample[8]),
+        decodeBigEndian(&sample[10]),
+        decodeBigEndian(&sample[12]),
+    };
+
+    for (int i = 0; i < 3; ++i) {
+        if ((accel_raw[i] == INT16_MIN) || (gyro_raw[i] == INT16_MIN)) {
+            ++invalid_sample_count_;
+            return false;
+        }
+    }
+
+    float accel[3];
+    float gyro[3];
+    for (int i = 0; i < 3; ++i) {
+        accel[i] = (static_cast<float>(accel_raw[i]) / ACCEL_LSB_PER_G) * GRAVITY_MPS2;
+        gyro[i] = (static_cast<float>(gyro_raw[i]) / GYRO_LSB_PER_DPS) * DEG_TO_RAD;
+    }
+
+    imu_axis_apply(&IMU_MAP_ICM_ACCEL, accel);
+    imu_axis_apply(&IMU_MAP_ICM_GYRO, gyro);
+    imu_calib_apply(gyro, accel);
+    imu_orient_apply(gyro);
+    imu_orient_apply(accel);
+
+    ImuData next = {};
+    for (int i = 0; i < 3; ++i) {
+        next.accel[i] = accel[i];
+        next.gyro[i] = gyro[i];
+    }
+    next.temp = (temp_raw == INT16_MIN)
+                    ? data_[published_index_].temp
+                    : static_cast<float>(temp_raw) / TEMP_SENSITIVITY + TEMP_OFFSET_C;
+    next.timestamp = timestamp_us;
+
+    const uint8_t next_index = static_cast<uint8_t>(published_index_ ^ 1U);
+    data_[next_index] = next;
+    __DMB();
+    published_index_ = next_index;
+    ++sample_count_;
+    return true;
 }
 
 void Icm42688p::onDrdyISR()
 {
-    BaseType_t hpw = pdFALSE;
-    if (s_acq_task != nullptr) {
-        vTaskNotifyGiveFromISR(s_acq_task, &hpw);
+    Icm42688p *const self = s_icm;
+    if ((self == nullptr) || !self->started_) {
+        return;
     }
-    portYIELD_FROM_ISR(hpw);
+
+    ++self->drdy_count_;
+    if (s_dma_busy) {
+        ++self->missed_drdy_count_;
+        return;
+    }
+
+    int index = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (s_raw_state[i] == RAW_FREE) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) {
+        ++self->missed_drdy_count_;
+        return;
+    }
+
+    s_raw_state[index] = RAW_DMA;
+    s_dma_index = static_cast<uint8_t>(index);
+    s_dma_busy = true;
+    s_raw_timestamp_us[index] = static_cast<uint32_t>(icm_platform_get_time_us());
+    __DMB();
+
+    chipSelectLow();
+    if (HAL_SPI_TransmitReceive_DMA(&hspi4, s_dma_tx, s_dma_rx[index],
+                                    SPI_FRAME_BYTES) != HAL_OK) {
+        chipSelectHigh();
+        s_raw_state[index] = RAW_FREE;
+        s_dma_busy = false;
+        ++self->dma_start_error_count_;
+    }
 }
 
 void Icm42688p::onSpiDmaDoneISR()
 {
-    BaseType_t hpw = pdFALSE;
-    if (s_spi_dma_done != nullptr) {
-        xSemaphoreGiveFromISR(s_spi_dma_done, &hpw);
+    if (!s_dma_busy) {
+        return;
     }
-    portYIELD_FROM_ISR(hpw);
+
+    chipSelectHigh();
+    const uint8_t index = s_dma_index;
+    __DMB();
+    s_raw_state[index] = RAW_READY;
+    s_dma_busy = false;
+
+    BaseType_t higher_priority_woken = pdFALSE;
+    if (s_parse_task != nullptr) {
+        vTaskNotifyGiveFromISR(s_parse_task, &higher_priority_woken);
+    }
+    portYIELD_FROM_ISR(higher_priority_woken);
+}
+
+void Icm42688p::onSpiErrorISR()
+{
+    chipSelectHigh();
+    if (!s_dma_busy) {
+        return;
+    }
+
+    Icm42688p *const self = s_icm;
+    s_raw_state[s_dma_index] = RAW_FREE;
+    s_dma_busy = false;
+    if (self != nullptr) {
+        ++self->spi_error_count_;
+    }
 }

@@ -31,7 +31,7 @@ bool imu_init(void);
 /** @brief 启动采集:ICM 武装 EXTI+DMA / BMI088 起轮询任务。 */
 void imu_start(void);
 
-/** @brief 取最新一帧标定后数据。指针长期有效,内容随采集刷新。 */
+/** @brief 取最新一帧标定后数据。调用后应立即复制，不要跨采样周期缓存指针。 */
 const ImuData *imu_get_data(void);
 
 #ifdef __cplusplus

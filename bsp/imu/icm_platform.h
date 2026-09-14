@@ -1,7 +1,6 @@
 /**
  * @file    icm_platform.h
- * @brief   ICM 官方驱动平台服务声明(ExtFunc 计时 + 初始化)。
- *          实现见 icm_platform.c。供 C/C++ 共用。
+ * @brief   ICM 驱动平台服务：DWT 微秒计时和 DMA 非缓存区配置。
  */
 #ifndef ICM_PLATFORM_H
 #define ICM_PLATFORM_H
@@ -19,9 +18,11 @@ void icm_platform_timer_init(void);
  *         在用 SPI4 DMA 前调用一次(Icm42688p::init 内)。 */
 void icm_platform_dma_region_init(void);
 
-/* 以下两个为官方驱动 ExtFunc 钩子,定义在 icm_platform.c。
- * 声明见 Invn/Drivers/Icm426xx/Icm426xxExtFunc.h,这里不重复声明,
- * 仅暴露初始化入口。 */
+/** @brief 返回启动计时器以来的单调微秒时间。 */
+uint64_t icm_platform_get_time_us(void);
+
+/** @brief DWT 忙等指定微秒，仅用于短暂的芯片初始化时序。 */
+void icm_platform_delay_us(uint32_t us);
 
 #ifdef __cplusplus
 }

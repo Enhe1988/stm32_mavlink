@@ -22,12 +22,13 @@ extern "C" {
 #endif
 
 /**
-  * @brief  初始化所有 MAVLink 端口(启动 DMA+IDLE 接收)。在外设初始化后调用。
+  * @brief  初始化所有 MAVLink 端口并启动 DMA+IDLE/HT/TC 接收。
+  * @note   由 mavlink_task 在调度器启动、任务句柄就绪后调用。
   */
 void Mavlink_Init(void);
 
 /**
-  * @brief  MAVLink 解析任务:轮询各端口排空 + 10ms 心跳。
+  * @brief  MAVLink 解析任务:等待 RX/错误通知，排空对应端口，并维持周期发送。
   */
 void mavlink_task(void const *pvParameters);
 

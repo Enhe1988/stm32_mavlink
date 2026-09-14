@@ -7,23 +7,40 @@
   ********************************************************
   */
 #include "mavlink_rc.h"
+#include "stm32h7xx_hal.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include <math.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
 
-static ELRS_Data elrs_data;
-static PC_Data_t pc_data;
+static MavlinkRcSnapshot_t s_rc_snapshot;
+static MavlinkPcSnapshot_t s_pc_snapshot;
 
-const ELRS_Data *get_remote_control_point(void)
+void mavlink_rc_get_snapshot(MavlinkRcSnapshot_t *out)
 {
-    return &elrs_data;
+    if (out == NULL)
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL();
+    *out = s_rc_snapshot;
+    taskEXIT_CRITICAL();
 }
 
-const PC_Data_t *get_pc_data_point(void)
+void mavlink_pc_get_snapshot(MavlinkPcSnapshot_t *out)
 {
-    return &pc_data;
+    if (out == NULL)
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL();
+    *out = s_pc_snapshot;
+    taskEXIT_CRITICAL();
 }
 
 static float float_Map(float input_value, float input_min, float input_max,
@@ -101,43 +118,60 @@ void mavlink_rc_dispatch(const mavlink_message_t *msg)
     case MAVLINK_MSG_ID_SET_ATTITUDE_TARGET:
     {
         mavlink_set_attitude_target_t packet;
+        MavlinkPcSnapshot_t next = {0};
         mavlink_msg_set_attitude_target_decode(msg, &packet);
-        Quaternion_to_Euler_Transform(&packet, &pc_data);
+        Quaternion_to_Euler_Transform(&packet, &next.data);
+        next.update_ms = HAL_GetTick();
+        next.valid = 1U;
+
+        taskENTER_CRITICAL();
+        next.frame_count = s_pc_snapshot.frame_count + 1U;
+        s_pc_snapshot = next;
+        taskEXIT_CRITICAL();
         break;
     }
 
     case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE:
     {
         mavlink_rc_channels_override_t packet;
+        MavlinkRcSnapshot_t next = {0};
+        ELRS_Data *elrs_data = &next.data;
         mavlink_msg_rc_channels_override_decode(msg, &packet);
-        elrs_data.channels[0]  = packet.chan1_raw;  // Roll (通常)
-        elrs_data.channels[1]  = packet.chan2_raw;  // Pitch (通常)
-        elrs_data.channels[2]  = packet.chan3_raw;  // Throttle (通常)
-        elrs_data.channels[3]  = packet.chan4_raw;  // Yaw (通常)
-        elrs_data.channels[4]  = packet.chan5_raw;  // Aux1
-        elrs_data.channels[5]  = packet.chan6_raw;  // Aux2
-        elrs_data.channels[6]  = packet.chan7_raw;  // Aux3
-        elrs_data.channels[7]  = packet.chan8_raw;  // Aux4
-        elrs_data.channels[8]  = packet.chan9_raw;
-        elrs_data.channels[9]  = packet.chan10_raw;
-        elrs_data.channels[10] = packet.chan11_raw;
-        elrs_data.channels[11] = packet.chan12_raw;
-        elrs_data.channels[12] = packet.chan13_raw;
-        elrs_data.channels[13] = packet.chan14_raw;
-        elrs_data.channels[14] = packet.chan15_raw;
-        elrs_data.channels[15] = packet.chan16_raw;
-        elrs_data.Left_X  = float_Map_with_median(elrs_data.channels[3], 1000, 2000, 1500, -100, 100);
-        elrs_data.Left_Y  = float_Map_with_median(elrs_data.channels[2], 1000, 2000, 1500, 0, 100);
-        elrs_data.Right_X = float_Map_with_median(elrs_data.channels[0], 1000, 2000, 1500, -100, 100);
-        elrs_data.Right_Y = float_Map_with_median(elrs_data.channels[1], 1000, 2000, 1500, -100, 100);
-        elrs_data.S1 = float_Map_with_median(elrs_data.channels[8], 1000, 2000, 1500, 0, 100);
-        elrs_data.S2 = float_Map_with_median(elrs_data.channels[9], 1000, 2000, 1500, 0, 100);
-        elrs_data.A = elrs_data.channels[10] > 1500 ? 1 : 0;
-        elrs_data.B = (elrs_data.channels[5] < 1200) ? 0 : ((elrs_data.channels[5] > 1800) ? 2 : 1);
-        elrs_data.C = (elrs_data.channels[6] < 1200) ? 0 : ((elrs_data.channels[6] > 1800) ? 2 : 1);
-        elrs_data.D = elrs_data.channels[11] > 1500 ? 1 : 0;
-        elrs_data.E = (elrs_data.channels[4] < 1200) ? 1 : ((elrs_data.channels[4] > 1800) ? 2 : 0);
-        elrs_data.F = (elrs_data.channels[7] < 1200) ? 1 : ((elrs_data.channels[7] > 1800) ? 2 : 0);
+        elrs_data->channels[0]  = packet.chan1_raw;  // Roll (通常)
+        elrs_data->channels[1]  = packet.chan2_raw;  // Pitch (通常)
+        elrs_data->channels[2]  = packet.chan3_raw;  // Throttle (通常)
+        elrs_data->channels[3]  = packet.chan4_raw;  // Yaw (通常)
+        elrs_data->channels[4]  = packet.chan5_raw;  // Aux1
+        elrs_data->channels[5]  = packet.chan6_raw;  // Aux2
+        elrs_data->channels[6]  = packet.chan7_raw;  // Aux3
+        elrs_data->channels[7]  = packet.chan8_raw;  // Aux4
+        elrs_data->channels[8]  = packet.chan9_raw;
+        elrs_data->channels[9]  = packet.chan10_raw;
+        elrs_data->channels[10] = packet.chan11_raw;
+        elrs_data->channels[11] = packet.chan12_raw;
+        elrs_data->channels[12] = packet.chan13_raw;
+        elrs_data->channels[13] = packet.chan14_raw;
+        elrs_data->channels[14] = packet.chan15_raw;
+        elrs_data->channels[15] = packet.chan16_raw;
+        elrs_data->Left_X  = float_Map_with_median(elrs_data->channels[3], 1000, 2000, 1500, -100, 100);
+        elrs_data->Left_Y  = float_Map_with_median(elrs_data->channels[2], 1000, 2000, 1500, 0, 100);
+        elrs_data->Right_X = float_Map_with_median(elrs_data->channels[0], 1000, 2000, 1500, -100, 100);
+        elrs_data->Right_Y = float_Map_with_median(elrs_data->channels[1], 1000, 2000, 1500, -100, 100);
+        elrs_data->S1 = float_Map_with_median(elrs_data->channels[8], 1000, 2000, 1500, 0, 100);
+        elrs_data->S2 = float_Map_with_median(elrs_data->channels[9], 1000, 2000, 1500, 0, 100);
+        elrs_data->A = elrs_data->channels[10] > 1500 ? 1 : 0;
+        elrs_data->B = (elrs_data->channels[5] < 1200) ? 0 : ((elrs_data->channels[5] > 1800) ? 2 : 1);
+        elrs_data->C = (elrs_data->channels[6] < 1200) ? 0 : ((elrs_data->channels[6] > 1800) ? 2 : 1);
+        elrs_data->D = elrs_data->channels[11] > 1500 ? 1 : 0;
+        elrs_data->E = (elrs_data->channels[4] < 1200) ? 1 : ((elrs_data->channels[4] > 1800) ? 2 : 0);
+        elrs_data->F = (elrs_data->channels[7] < 1200) ? 1 : ((elrs_data->channels[7] > 1800) ? 2 : 0);
+
+        next.update_ms = HAL_GetTick();
+        next.valid = 1U;
+        taskENTER_CRITICAL();
+        next.frame_count = s_rc_snapshot.frame_count + 1U;
+        s_rc_snapshot = next;
+        taskEXIT_CRITICAL();
         break;
     }
 

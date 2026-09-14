@@ -55,9 +55,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     application/mavlink_rc.c
     application/mavlink_flow.c
     application/mavlink_app.c
-    algorithm/AHRS_middleware.c
     algorithm/pid.c
-    algorithm/MahonyAHRS.c
     algorithm/filter.c
     bsp/bmi08a.c
     bsp/bmi08g.c
@@ -65,7 +63,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     bsp/bmi088_anymotiona.c
     bsp/bmi088_mma.c
     bsp/common.c
-    bsp/ringbuffer.c
     bsp/spl06.c
     # IMU 抽象层(我们写)
     bsp/imu/imu_api.cpp
@@ -75,13 +72,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     bsp/imu/imu_frame.c
     bsp/imu/imu_calib.c
     bsp/imu/imu_selftest.cpp
-    # 官方 Icm426xx 驱动最小集(已迁入 bsp/imu/icm426xx_sdk/)
-    bsp/imu/icm426xx_sdk/Invn/Drivers/Icm426xx/Icm426xxDriver_HL.c
-    bsp/imu/icm426xx_sdk/Invn/Drivers/Icm426xx/Icm426xxTransport.c
-    bsp/imu/icm426xx_sdk/Invn/EmbUtils/DataConverter.c
-    bsp/imu/icm426xx_sdk/Invn/EmbUtils/ErrorHelper.c
-    bsp/imu/icm426xx_sdk/Invn/EmbUtils/InvBasicMath.c
-    bsp/imu/icm426xx_sdk/Invn/EmbUtils/Message.c
 )
 
 # Add include paths
@@ -91,7 +81,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     algorithm
     bsp
     bsp/imu
-    bsp/imu/icm426xx_sdk
     Third_party
     Third_party/mavlink_c/common
     Third_party/mavlink_c
@@ -103,7 +92,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
     ARM_MATH_CM7
-    ICM42688P   # 选定芯片型号:官方驱动据此设量程/ODR/PLL 比例因子
 )
 
 # Remove wrong libob.a library dependency when using cpp files

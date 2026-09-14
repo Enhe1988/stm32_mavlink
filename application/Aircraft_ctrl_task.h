@@ -1,8 +1,9 @@
 #ifndef __AIRCRAFT_CTRL_TASK_H__
 #define __AIRCRAFT_CTRL_TASK_H__
 #include "INS_task.h"
-#include "mavlink_rc.h"   /* ELRS_Data / PC_Data_t 及遥控/上位机数据指针 */
+#include "mavlink_rc.h"   /* ELRS_Data / PC_Data_t 及原子快照接口 */
 #define RC_DEADBAND  2               //遥控器死区值
+#define RC_LINK_TIMEOUT_MS 100U       //超过该时间未收到有效遥控帧则进入零力模式
 typedef enum
 {
 	
@@ -17,8 +18,10 @@ typedef enum
 
 typedef struct
 {
-	const ELRS_Data *remote_data;//遥控器api获取
-	const PC_Data_t *pc_data;//上位机数据
+    ELRS_Data remote_data;       //本控制周期使用的完整遥控快照
+	PC_Data_t pc_data;            //本控制周期使用的上位机快照
+	uint32_t remote_update_ms;
+	uint8_t remote_valid;
 	const IMU_data_t *IMU_data;//IMU数据实例化
 	aircraft_behaviour_e aircraft_behaviour; //飞行器状态机初始化
   aircraft_behaviour_e last_aircraft_behaviour; //上一次飞行器状态机

@@ -29,7 +29,7 @@
 #include "string.h"
 #include "main.h"
 #include "pid.h"
-#include "ahrs.h"
+#include "struct_typedef.h"
 #include "spl06.h"
 #include "imu_selftest.h"
 #include "imu_api.h"        // 统一 IMU 抽象层:imu_init/imu_start/imu_get_data + ImuData

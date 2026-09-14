@@ -4,8 +4,8 @@
   * @brief      MAVLink 应用层装配。包含 MAVLink 库底层钩子(发送/system id)、
   *             各串口端口实例、DMA 接收缓冲、初始化与解析任务。
   *
-  *             接收链路改为 DMA(circular)+IDLE(方案A,见 mavlink_port.c),
-  *             不再使用逐字节中断与 ringbuffer。
+  *             接收链路为 DMA(circular)+IDLE/HT/TC 任务通知(见 mavlink_port.c),
+  *             DMA 缓冲本身作为零拷贝环形缓冲。
   ********************************************************
   */
 #include "mavlink_app.h"
@@ -18,7 +18,6 @@
 #include "task.h"
 #include "common/mavlink.h"
 #include "mavlink_types.h"
-#include <string.h>
 
 /* ───────── MAVLink 库底层钩子 ───────── */
 
@@ -34,8 +33,8 @@ void mavlink_send_uart_bytes(mavlink_channel_t chan, const uint8_t *ch, int leng
 
 /* ───────── DMA 接收缓冲(放 RAM_D2 非缓存区 .dma_buffer,见 icm_platform.c MPU)───────── */
 
-/* USART3 420000 baud,10ms 轮询约 420B,留余量 → 512B */
-#define RC_RX_BUF_SIZE   512U
+/* USART3 460800 baud,1024B 可容纳约 22ms 的满速连续数据。 */
+#define RC_RX_BUF_SIZE   1024U
 __attribute__((section(".dma_buffer"), aligned(4)))
 static uint8_t s_rc_rxbuf[RC_RX_BUF_SIZE];
 
@@ -50,7 +49,7 @@ static MavlinkPort_t g_rc_port = {
 #if MAVLINK_FLOW_PORT_ENABLE
 extern UART_HandleTypeDef huart2;
 
-/* USART2 115200 baud,10ms 轮询约 115B → 256B 足够 */
+/* USART2 115200 baud,256B 可容纳约 22ms 的满速连续数据。 */
 #define FLOW_RX_BUF_SIZE 256U
 __attribute__((section(".dma_buffer"), aligned(4)))
 static uint8_t s_flow_rxbuf[FLOW_RX_BUF_SIZE];
@@ -64,68 +63,149 @@ static MavlinkPort_t g_flow_port = {
 };
 #endif
 
+#define MAVLINK_EVENT_RC_RX       (1UL << 0)
+#define MAVLINK_EVENT_FLOW_RX     (1UL << 1)
+#define MAVLINK_EVENT_RC_ERROR    (1UL << 2)
+#define MAVLINK_EVENT_FLOW_ERROR  (1UL << 3)
+
+static TaskHandle_t s_mavlink_task;
+
+static void mavlink_notify_from_isr(uint32_t event)
+{
+    BaseType_t higher_priority_woken = pdFALSE;
+
+    if (s_mavlink_task != NULL)
+    {
+        xTaskNotifyFromISR(s_mavlink_task,
+                           event,
+                           eSetBits,
+                           &higher_priority_woken);
+        portYIELD_FROM_ISR(higher_priority_woken);
+    }
+}
+
 /* ───────── 初始化 ───────── */
 void Mavlink_Init(void)
 {
-    MavPort_Start(&g_rc_port);
+    while (MavPort_Start(&g_rc_port) != HAL_OK)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10U));
+    }
 #if MAVLINK_FLOW_PORT_ENABLE
-    MavPort_Start(&g_flow_port);
+    while (MavPort_Start(&g_flow_port) != HAL_OK)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10U));
+    }
 #endif
 }
 
-/* ───────── 10ms 硬编码心跳(保留原有功能,verbatim 自原 mavlink.c)───────── */
-static mavlink_message_t lastmsg;
-
-static void mavlink_test_heartbeat2(uint8_t system_id, uint8_t component_id, mavlink_message_t *last_msg)
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
 {
-    (void)system_id;
-    (void)component_id;
-    (void)last_msg;
-#ifdef MAVLINK_STATUS_FLAG_OUT_MAVLINK1
-    mavlink_status_t *status = mavlink_get_channel_status(MAVLINK_COMM_0);
-    if ((status->flags & MAVLINK_STATUS_FLAG_OUT_MAVLINK1) && MAVLINK_MSG_ID_HEARTBEAT >= 256)
-    {
-        return;
-    }
-#endif
-    uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
-    (void)buffer;
-    mavlink_heartbeat_t packet_in =
-    {
-        963497464, 17, 84, 151, 218, 3
-    };
-    mavlink_heartbeat_t packet1, packet2;
-    memset(&packet1, 0, sizeof(packet1));
-    packet1.custom_mode = packet_in.custom_mode;
-    packet1.type = packet_in.type;
-    packet1.autopilot = packet_in.autopilot;
-    packet1.base_mode = packet_in.base_mode;
-    packet1.system_status = packet_in.system_status;
-    packet1.mavlink_version = packet_in.mavlink_version;
+    (void)size;
+    HAL_UART_RxEventTypeTypeDef event_type = HAL_UARTEx_GetRxEventType(huart);
 
-#ifdef MAVLINK_STATUS_FLAG_OUT_MAVLINK1
-    if (status->flags & MAVLINK_STATUS_FLAG_OUT_MAVLINK1)
+    if (huart == g_rc_port.huart)
     {
-        // cope with extensions
-        memset(MAVLINK_MSG_ID_HEARTBEAT_MIN_LEN + (char *)&packet1, 0, sizeof(packet1) - MAVLINK_MSG_ID_HEARTBEAT_MIN_LEN);
+        MavPort_OnRxEventFromISR(&g_rc_port, event_type);
+        mavlink_notify_from_isr(MAVLINK_EVENT_RC_RX);
+    }
+#if MAVLINK_FLOW_PORT_ENABLE
+    else if (huart == g_flow_port.huart)
+    {
+        MavPort_OnRxEventFromISR(&g_flow_port, event_type);
+        mavlink_notify_from_isr(MAVLINK_EVENT_FLOW_RX);
     }
 #endif
-    memset(&packet2, 0, sizeof(packet2));
-    mavlink_msg_heartbeat_send(MAVLINK_COMM_0, packet1.type, packet1.autopilot, packet1.base_mode, packet1.custom_mode, packet1.system_status);
-    MAVLINK_ASSERT(memcmp(&packet1, &packet2, sizeof(packet1)) == 0);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == g_rc_port.huart)
+    {
+        g_rc_port.uart_errors++;
+        mavlink_notify_from_isr(MAVLINK_EVENT_RC_ERROR);
+    }
+#if MAVLINK_FLOW_PORT_ENABLE
+    else if (huart == g_flow_port.huart)
+    {
+        g_flow_port.uart_errors++;
+        mavlink_notify_from_isr(MAVLINK_EVENT_FLOW_ERROR);
+    }
+#endif
+}
+
+static void mavlink_restart_port(MavlinkPort_t *port)
+{
+    (void)HAL_UART_AbortReceive(port->huart);
+    while (MavPort_Start(port) != HAL_OK)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1U));
+    }
+}
+
+/* ───────── 2Hz 测试发送:固定 float,经 USART3 → 上位机 ───────── */
+/* 用 NAMED_VALUE_FLOAT(msg 251),QGC/Mission Planner/MAVLink Inspector 可直接显示。 */
+static void mavlink_test_send_float(void)
+{
+    const float test_value = 3.14f;   /* 固定测试数,验证发送链路 */
+    static const char test_name[10] = "test";
+    mavlink_msg_named_value_float_send(MAVLINK_COMM_0,
+                                        HAL_GetTick(),
+                                        test_name,
+                                        test_value);
 }
 
 /* ───────── 解析任务 ───────── */
 void mavlink_task(void const *pvParameters)
 {
     (void)pvParameters;
+    const TickType_t tx_period = pdMS_TO_TICKS(500U);
+
+    s_mavlink_task = xTaskGetCurrentTaskHandle();
+    Mavlink_Init();
+    TickType_t next_tx = xTaskGetTickCount() + tx_period;
+
     while (1)
     {
-        MavPort_Poll(&g_rc_port);
+        uint32_t events = 0;
+        TickType_t now = xTaskGetTickCount();
+        int32_t until_tx = (int32_t)(next_tx - now);
+        TickType_t wait_ticks = (until_tx > 0) ? (TickType_t)until_tx : 0U;
+
+        (void)xTaskNotifyWait(0U,
+                              UINT32_MAX,
+                              &events,
+                              wait_ticks);
+
+        if ((events & MAVLINK_EVENT_RC_ERROR) != 0U)
+        {
+            mavlink_restart_port(&g_rc_port);
+            events &= ~MAVLINK_EVENT_RC_RX;
+        }
+        else if ((events & MAVLINK_EVENT_RC_RX) != 0U)
+        {
+            (void)MavPort_Drain(&g_rc_port);
+        }
+
 #if MAVLINK_FLOW_PORT_ENABLE
-        MavPort_Poll(&g_flow_port);
+        if ((events & MAVLINK_EVENT_FLOW_ERROR) != 0U)
+        {
+            mavlink_restart_port(&g_flow_port);
+            events &= ~MAVLINK_EVENT_FLOW_RX;
+        }
+        else if ((events & MAVLINK_EVENT_FLOW_RX) != 0U)
+        {
+            (void)MavPort_Drain(&g_flow_port);
+        }
 #endif
-        mavlink_test_heartbeat2(1, 1, &lastmsg);   /* 保留:10ms 心跳 */
-        vTaskDelay(10);
+        now = xTaskGetTickCount();
+        if ((int32_t)(now - next_tx) >= 0)
+        {
+            mavlink_test_send_float();
+            do
+            {
+                next_tx += tx_period;
+            } while ((int32_t)(now - next_tx) >= 0);
+        }
     }
 }

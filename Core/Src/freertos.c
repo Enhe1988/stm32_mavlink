@@ -122,7 +122,7 @@ void MX_FREERTOS_Init(void) {
   fly_ctrlTaskHandle = osThreadCreate(osThread(FLY_CTRL), NULL);
 	
 #if (CURRENT_RC_PROTOCOL == RC_PROTOCOL_MAVLINK)
-   osThreadDef(MAV_LINK, mavlink_task, osPriorityNormal, 0, 256);
+   osThreadDef(MAV_LINK, mavlink_task, osPriorityAboveNormal, 0, 256);
    mavlinkTaskHandle = osThreadCreate(osThread(MAV_LINK), NULL);
 #else
 

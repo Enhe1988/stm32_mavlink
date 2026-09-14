@@ -15,8 +15,8 @@ extern "C" {
 typedef struct {
     /* ICM-42688-P (SPI4) */
     uint8_t  icm_who_am_i;       /* 期望 0x47 */
-    int32_t  icm_init_rc;        /* inv_icm426xx_init 返回码,0=ok */
-    uint8_t  icm_ok;             /* 1 = who_am_i 命中 0x47 */
+    int32_t  icm_init_rc;        /* 0=ok；-1 SPI；-2 复位；-3 ID；-4 配置；-5 任务 */
+    uint8_t  icm_ok;             /* 1 = 完整初始化成功且 ID 命中 0x47 */
 
     /* BMI088 (SPI1) */
     uint8_t  bmi_accel_chip_id;  /* 期望 0x1E */
