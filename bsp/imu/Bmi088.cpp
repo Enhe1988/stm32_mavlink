@@ -13,6 +13,7 @@
 extern "C" {
 #include "bmi088_mm.h"   // bmi088_mma_*
 #include "bmi08.h"       // bmi08g_* / bmi08a_*
+#include "bmi08x.h"      // BMI088_ACCEL_CHIP_ID
 #include "common.h"      // bmi08_interface_init, BMI08_SPI_INTF
 #include "main.h"        // HAL_GetTick
 #include "FreeRTOS.h"
@@ -37,17 +38,32 @@ static inline float bmi_gyro_to_rads(float raw)
     return ((BMI_GYRO_RANGE_DPS * raw) / BMI_HALF_SCALE) * BMI_DEG2RAD;
 }
 
-bool Bmi088::init()
+bool Bmi088::probe()
 {
+    dev_ = {};
+
     /* SPI1 接口 + delay api 绑定到 dev_ */
     if (bmi08_interface_init(&dev_, BMI08_SPI_INTF) != BMI08_OK) {
         return false;
     }
 
-    /* 读芯片 ID,确认两个传感器在线 */
-    if (bmi088_mma_init(&dev_) != BMI08_OK || bmi08g_init(&dev_) != BMI08_OK) {
+    /* 两颗 die 都读一遍，单颗缺失时调试信息仍保留另一颗的 ID。 */
+    const int8_t accel_result = bmi088_mma_init(&dev_);
+    const int8_t gyro_result = bmi08g_init(&dev_);
+    return (accel_result == BMI08_OK) && (gyro_result == BMI08_OK) &&
+           (dev_.accel_chip_id == BMI088_ACCEL_CHIP_ID) &&
+           (dev_.gyro_chip_id == BMI08_GYRO_CHIP_ID);
+}
+
+bool Bmi088::init()
+{
+    const bool already_probed =
+        (dev_.accel_chip_id == BMI088_ACCEL_CHIP_ID) &&
+        (dev_.gyro_chip_id == BMI08_GYRO_CHIP_ID);
+    if (!already_probed && !probe()) {
         return false;
     }
+
     if (bmi08a_soft_reset(&dev_) != BMI08_OK) {
         return false;
     }

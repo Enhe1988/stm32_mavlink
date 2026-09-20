@@ -2,7 +2,7 @@
  * @file    imu_api.h
  * @brief   IMU 抽象层对外 C 接口。
  *          INS_task 等上层只认这里的 ImuData 与三个函数,与具体芯片解耦。
- *          切换 IMU = 改 bsp_config.h 一行 #define,本头不变。
+ *          启动时自动探测并按 ICM45686 > ICM42688 > BMI088 选择。
  */
 #ifndef IMU_API_H
 #define IMU_API_H
@@ -25,7 +25,27 @@ typedef struct {
     uint32_t timestamp; /* 采样时刻(us 或 tick,由驱动定义) */
 } ImuData;
 
-/** @brief 软复位 + 配置 + 自检(读 WHO_AM_I)。调度器启动前调用。 */
+typedef enum {
+    IMU_TYPE_NONE = 0,
+    IMU_TYPE_ICM45686,
+    IMU_TYPE_ICM42688,
+    IMU_TYPE_BMI088,
+} imu_type_t;
+
+enum {
+    IMU_DETECTED_ICM45686 = (1U << 0),
+    IMU_DETECTED_ICM42688 = (1U << 1),
+    IMU_DETECTED_BMI088   = (1U << 2),
+};
+
+/** 调试器可直接观察：本次启动检测结果和最终选中的 IMU。 */
+extern volatile uint8_t g_imu_detected_mask;
+extern volatile imu_type_t g_imu_active_type;
+
+/** @brief 读取各芯片身份寄存器并按固定优先级选择，不执行传感器配置。 */
+imu_type_t imu_detect(void);
+
+/** @brief 自动探测，按优先级选择第一个能完成初始化的 IMU。 */
 bool imu_init(void);
 
 /** @brief 启动采集:ICM 武装 EXTI+DMA / BMI088 起轮询任务。 */
@@ -33,6 +53,9 @@ void imu_start(void);
 
 /** @brief 取最新一帧标定后数据。调用后应立即复制，不要跨采样周期缓存指针。 */
 const ImuData *imu_get_data(void);
+
+/** @brief 返回当前选中的型号；未检测到时返回 IMU_TYPE_NONE。 */
+imu_type_t imu_get_type(void);
 
 #ifdef __cplusplus
 }

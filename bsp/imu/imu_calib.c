@@ -7,7 +7,7 @@
  */
 #include "imu_calib.h"
 #include "imu_orientation.h"   /* imu_orient_unapply */
-#include "bsp_config.h"        /* IMU_USE_* 选型 */
+#include "bsp_config.h"        /* 上电标定开关 */
 #include "cmsis_os.h"          /* osDelay */
 
 #define IMU_CALIB_GRAVITY 9.80665f   /* 水平静止时机体 +Z(下)应读到的重力 */
@@ -17,23 +17,38 @@ volatile imu_bias_t g_imu_bias = {0};
 /* ── 按芯片写死的零偏(板子系,平放竖放通用)──
  * debug 跑 imu_calib_run 后,把 g_imu_bias 的 gyro/accel 抄到对应这里,
  * 再关掉 IMU_CALIB_ON_BOOT 即用这套值。初始为 0(=不校正)。 */
-#if defined(IMU_USE_ICM42688)
-static const imu_bias_t s_stored_bias = {
+static const imu_bias_t s_stored_bias_icm45686 = {
     { 0.0f, 0.0f, 0.0f },   /* gyro  rad/s */
     { 0.0f, 0.0f, 0.0f },   /* accel m/s²  */
     1U
 };
-#else /* IMU_USE_BMI088 */
-static const imu_bias_t s_stored_bias = {
+static const imu_bias_t s_stored_bias_icm42688 = {
     { 0.0f, 0.0f, 0.0f },
     { 0.0f, 0.0f, 0.0f },
     1U
 };
-#endif
+static const imu_bias_t s_stored_bias_bmi088 = {
+    { 0.0f, 0.0f, 0.0f },
+    { 0.0f, 0.0f, 0.0f },
+    1U
+};
 
 void imu_calib_load_stored(void)
 {
-    g_imu_bias = s_stored_bias;
+    switch (imu_get_type()) {
+    case IMU_TYPE_ICM45686:
+        g_imu_bias = s_stored_bias_icm45686;
+        break;
+    case IMU_TYPE_ICM42688:
+        g_imu_bias = s_stored_bias_icm42688;
+        break;
+    case IMU_TYPE_BMI088:
+        g_imu_bias = s_stored_bias_bmi088;
+        break;
+    default:
+        g_imu_bias = (imu_bias_t){0};
+        break;
+    }
 }
 
 void imu_calib_run(unsigned samples)

@@ -10,6 +10,7 @@
 
 - [功能特性](#功能特性)
 - [硬件平台](#硬件平台)
+- [当前实现状态](#当前实现状态)
 - [软件架构](#软件架构)
 - [目录结构](#目录结构)
 - [外设与引脚映射](#外设与引脚映射)
@@ -17,23 +18,24 @@
 - [数据流](#数据流)
 - [MAVLink 接收子系统](#mavlink-接收子系统)
 - [IMU 抽象层](#imu-抽象层)
-- [编译期配置](#编译期配置)
+- [IMU 与编译期配置](#imu-与编译期配置)
 - [构建与烧录](#构建与烧录)
 - [已知问题与待办](#已知问题与待办)
+- [协议与依赖](#协议与依赖)
 
 ---
 
 ## 功能特性
 
-- **IMU 抽象层**：仿 PX4 的 `ImuDriver` 基类（C++ 实现，对外暴露 C 接口），编译期选用 ICM-42688-P 或 BMI088，上层任务与具体芯片完全解耦。
+- **IMU 抽象层**：仿 PX4 的 `ImuDriver` 基类（C++ 实现，对外暴露 C 接口），上电自动探测 ICM-45686、ICM-42688-P 和 BMI088，上层任务与具体芯片完全解耦。
 - **姿态解算**：Madgwick AHRS（陀螺仪 + 加速度计融合），输出欧拉角。
 - **MAVLink 双口接收**：
   - USART3 — 遥控器（ELRS/MAVLink RC_CHANNELS_OVERRIDE）+ 上位机姿态指令（SET_ATTITUDE_TARGET）。
   - USART2 — 光流 + 测距模块（OPTICAL_FLOW_RAD + DISTANCE_SENSOR）。
   - 接收链路基于 **DMA(circular) + IDLE/HT/TC 中断 + 任务通知**，DMA 缓冲直接作为零拷贝环形区。
-- **串级 PID 控制**：Roll 双环（角度环 + 角速度环），Pitch/Yaw 单环；状态机切换飞行模式。
-- **气压计**：SPL06 经 I2C2 + DMA 读取（高度估计，解算逻辑待接入）。
-- **H743 Cache 一致性处理**：所有 DMA 缓冲集中放在 RAM_D2 的 MPU 非缓存区，规避 D-Cache 与 DMA 的数据一致性陷阱。
+- **飞行控制框架**：飞行模式状态机、PID 控制器和电机/舵机输出链路已建立；角速度 PID 当前尚未参与最终控制输出。
+- **气压计**：SPL06 经 I2C2 中断方式读取（`HAL_I2C_Mem_Read_IT`），高度解算尚未接入控制闭环。
+- **H743 Cache 一致性处理**：SPI4 与 UART 的 DMA 缓冲集中放在 RAM_D2 的 MPU 非缓存区，规避 D-Cache 与 DMA 的数据一致性问题。
 
 ---
 
@@ -42,14 +44,27 @@
 | 项目 | 规格 |
 |------|------|
 | MCU | STM32H743VIH6（Cortex-M7 @ 480MHz，2MB Flash，1MB RAM） |
-| 主 IMU | ICM-42688-P（SPI4，中断 + DMA），WHO_AM_I=0x47 |
-| 备选 IMU | BMI088（SPI1，轮询） |
-| 气压计 | SPL06（I2C2 + DMA） |
+| SPI4 IMU | ICM-45686 或 ICM-42688-P（同一贴片位置，中断 + DMA），WHO_AM_I=0xE9 / 0x47 |
+| SPI1 IMU | BMI088（轮询） |
+| 气压计 | SPL06（I2C2 中断读取） |
 | 光流模块 | PMW3901（光流）+ VL53L1X（ToF 测距），经 AT32F421 转 MAVLink v2 串口输出 |
 | 遥控链路 | ELRS 接收机（MAVLink RC over UART） |
 | 执行机构 | 2× 电机（差速推力，TIM3）+ 3× 舵机（推力矢量/Roll，TIM5） |
 
 原理图与数据手册见 `飞控原理图/` 与 `传感器数据手册/` 目录。
+
+---
+
+## 当前实现状态
+
+| 模块 | 当前状态 | 说明 |
+|------|----------|------|
+| IMU | 已接入，待实板覆盖测试 | 三类 IMU 上电自动探测；ICM-45686 与 ICM-42688-P 使用 DRDY + DMA，BMI088 使用轮询任务 |
+| 姿态解算 | 已接入 | `INS_task` 每 1ms 读取统一 IMU 快照并执行 Madgwick 解算 |
+| 遥控与上位机 | 已接入 | USART3 MAVLink 帧解码后按完整快照发布，遥控超时进入零力状态 |
+| 飞行控制 | 开发中 | 状态机、PID 和执行器输出已建立；角速度 PID 尚未参与最终控制输出 |
+| 光流与测距 | 已解析，未进闭环 | USART2 可接收 `OPTICAL_FLOW_RAD` 和 `DISTANCE_SENSOR` |
+| 气压高度 | 已读取，未进闭环 | SPL06 原始数据和高度计算链路已建立，尚未写入控制所用状态量 |
 
 ---
 
@@ -69,7 +84,7 @@
 │   filter                         二阶低通滤波              │
 ├──────────────────────────────────────────────────────────┤
 │ bsp/           板级支持/驱动层                             │
-│   imu/         IMU 抽象层(C++) + ICM/BMI 驱动 + 官方SDK    │
+│   imu/         IMU 抽象层 + ICM 最小驱动 + BMI088 适配层  │
 │   spl06        气压计驱动                                  │
 │   bmi08*       Bosch BMI088 官方 C 驱动                    │
 ├──────────────────────────────────────────────────────────┤
@@ -96,9 +111,9 @@ stm32_mavlink/
 │   └── filter.{c,h}                二阶低通滤波
 ├── bsp/                        板级驱动
 │   ├── imu/                        IMU 抽象层(详见下文)
-│   ├── spl06.{c,h}                 SPL06 气压计(I2C+DMA)
+│   ├── spl06.{c,h}                 SPL06 气压计(I2C 中断读取)
 │   ├── bmi08*.{c,h}                Bosch BMI088 官方驱动
-│   └── bsp_config.h                编译期选型(IMU/放置/标定开关)
+│   └── bsp_config.h                放置方式/标定开关（IMU 型号上电自动探测）
 ├── Third_party/mavlink_c/      MAVLink v2 C 库(common dialect)
 ├── Core/                       CubeMX: main / freertos / 外设初始化 / 中断
 ├── Drivers/                    STM32H7 HAL + CMSIS
@@ -116,9 +131,9 @@ stm32_mavlink/
 
 | 外设 | 用途 | 引脚 | 备注 |
 |------|------|------|------|
-| **SPI4** | ICM-42688-P | SCK=PE12, MISO=PE13, MOSI=PE14, CS=PE11, **INT=PE15** | 15MHz, Mode0, 中断+DMA |
+| **SPI4** | ICM-45686 / ICM-42688-P | SCK=PE12, MISO=PE13, MOSI=PE14, CS=PE11, **INT=PE15** | 同一贴片位置，15MHz, Mode0, 中断+DMA |
 | **SPI1** | BMI088 | SCK=PA5, MISO=PA6, MOSI=PD7, gyroCS=PC15, accelCS=PB2 | 中断未引出 → 轮询 |
-| **I2C2** | SPL06 气压计 | SCL=PB10, SDA=PB11 | DMA(DMA1_Stream0/1) |
+| **I2C2** | SPL06 气压计 | SCL=PB10, SDA=PB11 | `HAL_I2C_Mem_Read_IT`，I2C 事件/错误中断 |
 | **USART3** | MAVLink 遥控/上位机 | TX=PD8, RX=PD9 | **460800** 8N1, DMA(Stream5/6) |
 | **USART2** | MAVLink 光流/测距 | RX=PD6 (TX=PD5 未用) | 115200 8N1, DMA(Stream2, circular) |
 | **TIM3** | 推力电机 ×2 | CH3=PB0, CH4=PB1 | PWM, 1000–1900 |
@@ -145,14 +160,18 @@ stm32_mavlink/
 ## 数据流
 
 ```
-ICM-42688-P ──SPI4 中断+DMA──► imu_get_data() ─┐
-                                                ├─► INS_task ─Madgwick─► INS_angle ─┐
-气压计 SPL06 ──I2C2+DMA──────► (高度，待接入) ──┘                                  │
-                                                                                    ▼
-遥控器/上位机 ─USART3─MAVLink─► 完整帧快照（RC / PC）───────────────────────────► Aircraft_ctrl_task
-                                                                                    │  (状态机 + 串级PID)
-光流/测距 ────USART2─MAVLink─► get_optical_flow_point() (待接入控制)               ▼
-                                                                          TIM3 电机 / TIM5 舵机
+上电探测 ─► ICM-45686 / ICM-42688-P / BMI088 ─► 选择可初始化的最高优先级设备
+                         │
+                         ├─ ICM: DRDY + SPI4 DMA ─┐
+                         └─ BMI: SPI1 轮询任务 ───┴─► imu_get_data() ─► INS_task
+                                                                        │
+                                                                        └─ Madgwick ─► INS_angle ─┐
+                                                                                                   │
+遥控器/上位机 ─USART3─MAVLink─► 完整帧快照（RC / PC）───────────────────────────────► Aircraft_ctrl_task
+                                                                                                   │
+光流/测距 ────USART2─MAVLink─► get_optical_flow_point()（待接入控制）               │
+气压计 SPL06 ─I2C2 中断读取─► 高度计算（待接入控制）                               ▼
+                                                                                         TIM3 电机 / TIM5 舵机
 ```
 
 IMU 与光流继续通过只读指针接口取最新数据；遥控和上位机指令按完整快照发布，飞控任务每轮原子复制一份本地数据，避免读到一帧更新到一半的混合值。
@@ -182,7 +201,9 @@ USART3 缓冲为 1024B，USART2 缓冲为 256B，均位于 RAM_D2 的 `.dma_buff
 
 | 文件 | 说明 |
 |------|------|
-| `imu_api.{h,cpp}` | 对外 C 接口：`imu_init` / `imu_start` / `imu_get_data`，统一数据 `ImuData`（rad/s, m/s²）+ 编译期选型 |
+| `imu_api.{h,cpp}` | 对外 C 接口、全型号探测和优先级选择；统一数据 `ImuData`（rad/s, m/s²） |
+| `Icm45686.{hpp,cpp}` | ICM-45686 最小驱动（±16g/±2000dps/800Hz；DRDY→SPI4 DMA→解析任务） |
+| `icm45686_regs.h` | 本工程使用的 ICM-45686 直接/间接寄存器和配置位 |
 | `imu.hpp` | `ImuDriver` 抽象基类 |
 | `Icm42688p.{hpp,cpp}` | ICM-42688-P 自研最小驱动（阻塞初始化；DRDY→SPI4 DMA→解析任务） |
 | `icm42688p_regs.h` | 本工程使用的 ICM-42688-P 寄存器和配置位 |
@@ -190,22 +211,39 @@ USART3 缓冲为 1024B，USART2 缓冲为 256B，均位于 RAM_D2 的 `.dma_buff
 | `icm_platform.{c,h}` | 平台服务：DWT 微秒计时 + MPU 非缓存区配置 |
 | `imu_frame.{c,h}` / `imu_orientation.h` | 传感器系 → 机体系旋转映射（机体系：X前/Y右/Z下） |
 | `imu_calib.{c,h}` | 零偏标定（上电实测或写死值） |
-| `imu_selftest.{cpp,h}` | 双芯片通信自检（POST） |
+| `imu_selftest.{cpp,h}` | 三类 IMU 探测与初始化诊断信息 |
 
-切换 IMU 只需改 `bsp/bsp_config.h` 一行 `#define`，上层无感知。当前接口与配置以 `bsp/imu/` 的实现为准。
+启动时会读取三类芯片的身份寄存器，并按 `ICM-45686 > ICM-42688-P > BMI088` 尝试完整初始化；高优先级初始化失败时继续尝试下一款。`g_imu_detected_mask` 和 `g_imu_active_type` 可在调试器中查看，上层无需按芯片分支。
 
 ICM 运行期链路为：`PE15 DRDY ISR → 启动 15 字节 SPI4 TxRx DMA → DMA 完成 ISR → 一次任务通知 → 解析/换算/标定 → 双缓冲发布`。DRDY ISR 不再先唤醒采集任务，也不在中断中做浮点运算。
 
+三款 IMU 的当前运行参数：
+
+| 型号 | 总线与采集方式 | 加速度计 | 陀螺仪 | 输出速率 |
+|------|----------------|----------|--------|----------|
+| ICM-45686 | SPI4，DRDY + DMA | ±16g | ±2000dps | 800Hz |
+| ICM-42688-P | SPI4，DRDY + DMA | ±16g | ±2000dps | 1kHz |
+| BMI088 | SPI1，独立轮询任务 | ±6g，800Hz | ±1000dps，1kHz | 由轮询任务发布 |
+
+ICM-45686 与 ICM-42688-P 共用同一贴片位置和 SPI4 引脚。两者的寄存器配置与运行期读数均由本工程最小驱动完成，不依赖厂商 SDK；BMI088 适配层继续使用 Bosch 驱动。
+
+调试器可观察以下全局量：
+
+| 变量 | 含义 |
+|------|------|
+| `g_imu_detected_mask` | 探测位图：bit0=ICM-45686、bit1=ICM-42688-P、bit2=BMI088 |
+| `g_imu_active_type` | 当前设备：0=None、1=ICM-45686、2=ICM-42688-P、3=BMI088 |
+| `g_imu_selftest` | 各芯片 ID、探测结果、初始化返回值和最终选择结果 |
+
+数据在发布前统一执行：物理量换算 → `imu_frame` 轴映射 → 板子系零偏扣除 → `imu_orientation` 放置旋转。统一输出单位为陀螺仪 rad/s、加速度计 m/s²。
+
 ---
 
-## 编译期配置
+## IMU 与编译期配置
 
-集中在 `bsp/bsp_config.h`：
+IMU 型号不再编译期手选。`bsp/bsp_config.h` 只保留板子放置和上电标定配置：
 
 ```c
-#define IMU_USE_ICM42688      // IMU 选型: ICM-42688-P / BMI088 二选一
-//#define IMU_USE_BMI088
-
 #define BOARD_ORIENT_FLAT     // 板子放置: 平放 / 竖放
 //#define BOARD_ORIENT_VERTICAL
 
@@ -225,7 +263,9 @@ ICM 运行期链路为：`PE15 DRDY ISR → 启动 15 字节 SPI4 TxRx DMA → D
 
 ```powershell
 $env:Path = "C:\Users\<user>\AppData\Local\stm32cube\bundles\cmake\<ver>\bin;" +
-            "C:\Users\<user>\AppData\Local\stm32cube\bundles\ninja\<ver>\bin;" + $env:Path
+            "C:\Users\<user>\AppData\Local\stm32cube\bundles\ninja\<ver>\bin;" +
+            "C:\Users\<user>\AppData\Local\stm32cube\bundles\gnu-tools-for-stm32\<ver>\bin;" +
+            $env:Path
 
 cmake --preset Debug          # 改了 CMakeLists / 加了源文件后需重跑
 cmake --build build/Debug      # 产物: build/Debug/fly_control_stm.elf
@@ -234,12 +274,15 @@ cmake --build build/Debug      # 产物: build/Debug/fly_control_stm.elf
 - 推荐使用 **STM32 VS Code 扩展（cube-cmake）** 一键构建/调试/烧录。
 - 也可用 STM32CubeIDE 导入 `.ioc`。
 - C++ 工具链配置见 `cmake/gcc-arm-none-eabi.cmake`（C++17，`-fno-rtti / -fno-exceptions / -fno-threadsafe-statics`）。
+- `.dma_buffer` 位于 RAM_D2，链接脚本限制该非缓存区最大为 2KB；超过容量时链接会直接失败。
 
 ---
 
 ## 已知问题与待办
 
+- **ICM-45686 需完成实板验证**：重点检查上电初始化、DRDY 频率、DMA 连续采样、温度值和静止时三轴方向。
 - **IMU 轴映射需随硬件复核**：ICM 与 BMI088 的当前映射集中在 `bsp/imu/imu_frame.c`，换板或改安装方向后需重新验证。
+- **角速度 PID 尚未进入最终输出**：现阶段不能把控制器结构视为已完成的完整串级闭环。
 - **光流数据未接入控制**：`get_optical_flow_point()` 已可取到 `range_cm` / `flow_x_rad` 等，尚未接入 `Aircraft_ctrl_task` 做定高/水平速度控制。
 - **气压计高度未接入**：SPL06 已读取，解算高度尚未写入 INS 数据结构供控制使用。
 - **加速度零偏/温补、IMU 温度读取**等为可选优化项（BMI088 温度暂填 0）。
@@ -252,7 +295,7 @@ cmake --build build/Debug      # 产物: build/Debug/fly_control_stm.elf
 - **MAVLink**：c_library_v2（common dialect），见 `Third_party/mavlink_c/`。
 - **FreeRTOS** + **CMSIS-RTOS v1**。
 - **CMSIS-DSP**（ARM Math）。
-- **Bosch BMI08x 驱动**；ICM-42688-P 由本工程按数据手册直接驱动。
+- **Bosch BMI08x 驱动**；ICM-45686 与 ICM-42688-P 由本工程按各自数据手册直接驱动。
 
 ---
 

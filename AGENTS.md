@@ -7,7 +7,7 @@ STM32H743VIH6 飞控，480MHz，FreeRTOS/CMSIS-OS v1。构建使用 CMake + Ninj
 - algorithm：PID 与二阶低通滤波；当前使用的 Madgwick 实现在 application/INS_task.c。
 - bsp/imu：C++ ImuDriver 抽象，对外暴露 extern "C" 的 imu_init/imu_start/imu_get_data。
 - IMU 统一输出 rad/s、m/s²；INS_angle 顺序为 yaw/pitch/roll，单位为度。
-- 编译期 IMU 选型、平/竖放和上电标定开关集中于 bsp/bsp_config.h。
+- IMU 在启动时按 ICM-45686 > ICM-42688-P > BMI088 自动探测选择；平/竖放和上电标定开关集中于 bsp/bsp_config.h。
 
 ## IMU 架构约束
 - 各驱动自管采集节拍：ICM 使用 DRDY 驱动的 DMA 链路，BMI088 使用独立轮询任务。
@@ -17,8 +17,16 @@ STM32H743VIH6 飞控，480MHz，FreeRTOS/CMSIS-OS v1。构建使用 CMake + Ninj
 - SPI/UART DMA 缓冲置于 RAM_D2 的 .dma_buffer 段；MPU region1 覆盖 0x30000000 起始 2KB，新增缓冲需检查容量。
 - 调用 FreeRTOS FromISR API 的中断使用逻辑优先级 5 或更低紧急度。
 
+## MAVLink 架构约束
+- USART3（遥控/上位机）与 USART2（光流/测距）使用 circular RX DMA；IDLE、HT、TC 回调只记录事件并通知 MAVLink 任务，不在 ISR 中解析协议。
+- MAVLink 任务根据 DMA TC 回绕次数和 NDTR 计算累计生产量，从 DMA 缓冲的 `tail` 排空新字节；发生一整圈覆盖时统计丢字节并重置残帧解析状态。
+- USART3 与 USART2 分别使用 MAVLINK_COMM_0 / MAVLINK_COMM_1，不能让两路物理字节流共用同一个 MAVLink parser channel。
+- 遥控和上位机指令在整帧解码完成后按完整快照原子发布；飞控任务复制本地快照使用，不直接读取正在更新的共享结构。
+- 遥控快照超过 `RC_LINK_TIMEOUT_MS`（当前 100ms）未更新时，飞控状态机必须进入 `Aircraft_ZERO_FORCE`。
+- MAVLink 周期发送由任务通知等待的超时时间和绝对截止时间驱动，不使用解析循环次数充当发送分频器。
+
 ## 硬件
-- ICM-42688-P：SPI4，PE12/PE13/PE14，CS=PE11，INT=PE15，WHO_AM_I=0x47。
+- ICM-45686 / ICM-42688-P：共用 SPI4 与贴片位置，PE12/PE13/PE14，CS=PE11，INT=PE15；WHO_AM_I 分别为 0xE9 / 0x47。
 - BMI088：SPI1，PA5/PA6/PD7，两路 CS=PC15/PB2；中断未引出。片选角色以实际驱动与板上验证为准。
 - USART3：460800，遥控与上位机；USART2：115200，光流与测距。
 - TIM3 CH3/CH4：电机；TIM5 CH2/CH3/CH4：舵机。
@@ -30,6 +38,7 @@ STM32H743VIH6 飞控，480MHz，FreeRTOS/CMSIS-OS v1。构建使用 CMake + Ninj
 - 光流/测距与气压高度尚未接入控制闭环；角速度 PID 当前未参与控制输出。
 - CubeMX 生成代码的手工修改放 USER CODE 区；保留 .ioc、生成配置和厂商依赖。
 - README 与历史注释可能滞后，应核对真实调用链。
+- 新任务先以本文件确定长期约束，再阅读 README 的总体数据流和目标模块源码；实现细节冲突时以当前源码、CubeMX 配置和链接结果为准。
 
 ## 关联资料
 - 光流测距_串口数据协议说明.md：光流模块协议。

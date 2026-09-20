@@ -1,6 +1,6 @@
 /**
  * @file    imu_frame.h
- * @brief   传感器系 → 机体(板子)系 轴向映射,统一处理两颗 IMU。
+ * @brief   传感器系 → 机体(板子)系 轴向映射,统一处理各款 IMU。
  *
  *  映射定义:body[i] = sign[i] * sensor[axis[i]]  (axis: 0=x,1=y,2=z)
  *  在各驱动填完芯片原始轴物理量后、板子放置旋转(imu_orientation.h)之前调用。
@@ -34,8 +34,8 @@ static inline void imu_axis_apply(const imu_axis_map_t *m, float v[3])
 /* ── 各芯片映射(定义见 imu_frame.c,标定改那里)──
  * accel/gyro 分开:加速度用"轴朝下=+9.8"约定、陀螺用右手定则,两者符号通常不同,
  * 即便单 die 的 ICM 也需各一套。 */
-extern const imu_axis_map_t IMU_MAP_ICM_ACCEL;  /* ICM-42688-P 加速度 */
-extern const imu_axis_map_t IMU_MAP_ICM_GYRO;   /* ICM-42688-P 陀螺 */
+extern const imu_axis_map_t IMU_MAP_ICM_ACCEL;  /* ICM-45686 / ICM-42688-P 加速度 */
+extern const imu_axis_map_t IMU_MAP_ICM_GYRO;   /* ICM-45686 / ICM-42688-P 陀螺 */
 extern const imu_axis_map_t IMU_MAP_BMI_ACCEL;  /* BMI088 加速度 */
 extern const imu_axis_map_t IMU_MAP_BMI_GYRO;   /* BMI088 陀螺 */
 

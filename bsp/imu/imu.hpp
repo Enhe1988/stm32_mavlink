@@ -11,6 +11,9 @@ class ImuDriver {
 public:
     virtual ~ImuDriver() = default;
 
+    /** 只读取身份寄存器判断芯片是否在线，不改变运行配置。 */
+    virtual bool probe() = 0;
+
     /** 软复位 + 配置 + 自检。成功返回 true。 */
     virtual bool init() = 0;
 

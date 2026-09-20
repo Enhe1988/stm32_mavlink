@@ -15,7 +15,7 @@ extern "C" {
 void icm_platform_timer_init(void);
 
 /** @brief 给 .dma_buffer 所在 RAM_D2 起始区配 MPU 非缓存属性。
- *         在用 SPI4 DMA 前调用一次(Icm42688p::init 内)。 */
+ *         在自动探测及使用 SPI4/UART DMA 前调用一次。 */
 void icm_platform_dma_region_init(void);
 
 /** @brief 返回启动计时器以来的单调微秒时间。 */

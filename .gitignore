@@ -21,6 +21,12 @@ mx.scratch
 JLinkLog.txt
 .clangd/
 
+# 忽略本地面试题库
+/docs/interview/
+
+# 忽略临时分析文件
+/tmp/
+
 # 忽略 Keil 遗留配置 (以防万一)
 Objects/
 Listings/

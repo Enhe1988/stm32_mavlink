@@ -31,7 +31,6 @@
 #include "pid.h"
 #include "struct_typedef.h"
 #include "spl06.h"
-#include "imu_selftest.h"
 #include "imu_api.h"        // 统一 IMU 抽象层:imu_init/imu_start/imu_get_data + ImuData
 #include "bsp_config.h"     // IMU_CALIB_ON_BOOT / IMU_CALIB_SAMPLES
 #include "imu_calib.h"      // imu_calib_run / g_imu_bias
@@ -214,10 +213,7 @@ void INS_task(void const *pvParameters)
 {
 	  vTaskDelay(1000);
 
-	  /* 通信自检(两个 IMU 都测一遍,结果存 g_imu_selftest 供调试器查看) */
-	  imu_selftest_run();
-
-	  /* 统一抽象层:编译期选定的 IMU(见 bsp_config.h)初始化 + 起采集任务 */
+	  /* 统一抽象层:自动探测并按 45686 > 42688 > BMI088 选择，然后启动采集。 */
 	  g_imu_init_ok = imu_init() ? 1U : 0U;
 	  imu_start();
 

@@ -14,10 +14,13 @@ extern "C" {
 
 class Bmi088 : public ImuDriver {
 public:
+    bool probe() override;
     bool init() override;
     void start() override;
     const ImuData &getData() const override { return data_; }
     uint32_t sampleCount() const { return sample_count_; }  /* 轮询累计帧数 */
+    uint8_t accelChipId() const { return dev_.accel_chip_id; }
+    uint8_t gyroChipId() const { return dev_.gyro_chip_id; }
 
 private:
     static void pollTaskTramp(void *arg);

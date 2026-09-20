@@ -66,6 +66,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     bsp/spl06.c
     # IMU 抽象层(我们写)
     bsp/imu/imu_api.cpp
+    bsp/imu/Icm45686.cpp
     bsp/imu/Icm42688p.cpp
     bsp/imu/Bmi088.cpp
     bsp/imu/icm_platform.c

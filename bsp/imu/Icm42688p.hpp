@@ -9,6 +9,7 @@
 
 class Icm42688p : public ImuDriver {
 public:
+    bool probe() override;
     bool init() override;
     void start() override;
     const ImuData &getData() const override;

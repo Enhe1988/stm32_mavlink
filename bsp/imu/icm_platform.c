@@ -62,8 +62,8 @@ void icm_platform_dma_region_init(void)
     /* 把 .dma_buffer 所在的 RAM_D2 起始 2KB 标记为 Normal 非缓存,
      * 解决 H743 "DMA 写内存 / CPU 读旧缓存" 一致性问题。
      * 只新增 region1,不动生成代码里 MPU_Config 的 region0(重生成安全)。
-     * 容量需覆盖该段所有 DMA 缓冲:ICM SPI + USART3 RX(1024B) +
-     * USART2 RX(256B,光流),当前链接结果为 1344B。新增缓冲需确保不超 2KB。 */
+     * 容量需覆盖该段所有 DMA 缓冲:两款 ICM SPI + USART3 RX(1024B) +
+     * USART2 RX(256B,光流),当前链接结果为 1408B。新增缓冲需确保不超 2KB。 */
     MPU_Region_InitTypeDef cfg = {0};
 
     HAL_MPU_Disable();

@@ -2,19 +2,9 @@
 #define BSP_CONFIG_H
 
 /*
- * 编译期 IMU 选型:只定义其中一个。
- *   IMU_USE_ICM42688  —— ICM-42688-P,SPI4,中断+DMA
- *   IMU_USE_BMI088    —— BMI088,SPI1,轮询
+ * IMU 不再编译期手选。启动时读取身份寄存器并按以下优先级自动选择：
+ * ICM-45686 > ICM-42688-P > BMI088。
  */
-#define IMU_USE_ICM42688
- //#define IMU_USE_BMI088 
-
-#if defined(IMU_USE_ICM42688) && defined(IMU_USE_BMI088)
-#error "bsp_config.h: IMU_USE_ICM42688 与 IMU_USE_BMI088 只能二选一"
-#endif
-#if !defined(IMU_USE_ICM42688) && !defined(IMU_USE_BMI088)
-#error "bsp_config.h: 必须定义 IMU_USE_ICM42688 或 IMU_USE_BMI088 之一"
-#endif
 
 /*
  * 编译期板子放置方式:只定义其中一个。对 gyro/accel 施加同一个旋转(见 imu_orientation.h)。

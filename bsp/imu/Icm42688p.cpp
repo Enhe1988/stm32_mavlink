@@ -79,31 +79,6 @@ inline int16_t decodeBigEndian(const uint8_t *p)
 
 } /* namespace */
 
-extern "C" {
-
-void HAL_GPIO_EXTI_Callback(uint16_t pin)
-{
-    if (pin == ICM_INT_Pin) {
-        Icm42688p::onDrdyISR();
-    }
-}
-
-void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *spi)
-{
-    if (spi->Instance == SPI4) {
-        Icm42688p::onSpiDmaDoneISR();
-    }
-}
-
-void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *spi)
-{
-    if (spi->Instance == SPI4) {
-        Icm42688p::onSpiErrorISR();
-    }
-}
-
-} /* extern "C" */
-
 const ImuData &Icm42688p::getData() const
 {
     const uint8_t index = published_index_;
@@ -144,6 +119,16 @@ bool Icm42688p::writeRegister(uint8_t reg, uint8_t value)
         HAL_SPI_Transmit(&hspi4, tx, sizeof(tx), SPI_TIMEOUT_MS);
     chipSelectHigh();
     return status == HAL_OK;
+}
+
+bool Icm42688p::probe()
+{
+    chipSelectHigh();
+    who_am_i_ = 0U;
+    /* MCU 单独复位时芯片可能仍停在非 0 bank，先显式切回 bank 0。 */
+    return writeRegister(REG_BANK_SEL, BANK0) &&
+           readRegisters(WHO_AM_I, &who_am_i_, 1U) &&
+           (who_am_i_ == WHO_AM_I_VALUE);
 }
 
 bool Icm42688p::selectBank(uint8_t bank)
