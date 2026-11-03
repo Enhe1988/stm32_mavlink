@@ -31,6 +31,7 @@
 #include "spl06.h"
 #include "mavlink_app.h"
 #include "common.h"
+#include "bsp_platform.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -94,6 +95,13 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+  /* D-Cache 与 DMA 一致性
+   * 顺序不可颠倒：先以 MPU 将 RAM_D2 的 .dma_buffer 标为非缓存，再开启 D-Cache。
+   * SPI/UART DMA 均在后续外设/任务初始化后才启动；DMA 缓冲不依赖逐帧 Cache 维护。
+   * 其他正常缓存区仍能受益于 D-Cache。这里只体现实现配置，不代表硬件验证记录。 */
+  bsp_dma_region_init(); /* SPI/UART DMA 非缓存区：任务启动前统一配置。 */
+  SCB_EnableDCache(); /* .dma_buffer 已由 MPU 标记为非缓存，随后才启动任何 DMA。 */
+  bsp_time_init();
   HAL_Delay_us_init(480);//给IMU用的延时
   /* USER CODE END SysInit */
 
@@ -109,18 +117,7 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   /* MAVLink RX DMA 在 mavlink_task 取得任务句柄后启动。 */
-  //HAL_TIM_PWM_Start(&htim5, TIM_CHANNEL_1);
-	//HAL_TIM_PWM_Start(&htim5, TIM_CHANNEL_2);
-	//HAL_TIM_PWM_Start(&htim5, TIM_CHANNEL_3);
-	//HAL_TIM_PWM_Start(&htim5, TIM_CHANNEL_4);
-	//HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
-	//HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
- // __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_3, 1000);
-	//__HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_4, 1000);
-   
-  //__HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_2, 1500);//初始舵机角度
- // __HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_3, 1500);
-  //__HAL_TIM_SetCompare(&htim5, TIM_CHANNEL_4, 1500);
+  /* PWM 由 Aircraft_ctrl_task 按 AIRCRAFT_MODEL / AIRCRAFT_PWM_ENABLE 初始化。 */
   watch_test=1000;
   /* USER CODE END 2 */
 

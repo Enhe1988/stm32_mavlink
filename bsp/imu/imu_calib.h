@@ -4,7 +4,7 @@
  *          放在板子系的好处:零偏 = map(芯片原始零偏),只跟芯片有关、
  *          【与平放/竖放无关】—— 一套写死的值平放竖放都通用。
  *
- *  位置:各驱动 imu_axis_apply 之后、imu_orient_apply 之前调用 imu_calib_apply()。
+ *  位置:imu_publish 中 imu_axis_apply 之后、imu_orient_apply 之前调用 imu_calib_apply()。
  *  标定:imu_calib_run() 上电静止采样算机体系零偏,再用 imu_orient_unapply 转回板子系存。
  *        本次启动跑实测标定 还是 用写死值,由 bsp_config.h 的 IMU_CALIB_ON_BOOT 决定:
  *          定义   → imu_calib_run()(debug 时读 g_imu_bias 抄进 imu_calib.c 的写死值)
@@ -14,11 +14,8 @@
 #define IMU_CALIB_H
 
 #include <stdint.h>
-#include "imu_api.h"   /* ImuData / imu_get_data */
+#include "imu_api.h"   /* ImuData / imu_read */
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 typedef struct {
     float   gyro[3];    /* 板子系陀螺零偏 (rad/s) */
@@ -50,8 +47,5 @@ void imu_calib_run(unsigned samples);
  *         不跑实测标定时用(IMU_CALIB_ON_BOOT 未定义)。 */
 void imu_calib_load_stored(void);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* IMU_CALIB_H */

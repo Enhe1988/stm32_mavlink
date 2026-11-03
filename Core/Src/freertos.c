@@ -115,6 +115,10 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
+  /* 多任务优先级与控制周期
+   * ICM 解析任务由驱动创建，优先级 configMAX_PRIORITIES-1；本处创建应用消费者。
+   * INS=High、MAVLink=AboveNormal、飞控=Normal；INS/飞控 1ms，通信等事件。
+   * 任务优先级数字与 NVIC 中断优先级不是一套含义；FromISR 中断单独按优先级 5 配置。 */
   	osThreadDef(INS, INS_task, osPriorityHigh, 0, 256);
   imuTaskHandle = osThreadCreate(osThread(INS), NULL);
 	
@@ -122,7 +126,8 @@ void MX_FREERTOS_Init(void) {
   fly_ctrlTaskHandle = osThreadCreate(osThread(FLY_CTRL), NULL);
 	
 #if (CURRENT_RC_PROTOCOL == RC_PROTOCOL_MAVLINK)
-   osThreadDef(MAV_LINK, mavlink_task, osPriorityAboveNormal, 0, 256);
+   /* 遥测打包及光流解算使用完整 INS/光流局部快照，预留 2KB 栈。 */
+   osThreadDef(MAV_LINK, mavlink_task, osPriorityAboveNormal, 0, 512);
    mavlinkTaskHandle = osThreadCreate(osThread(MAV_LINK), NULL);
 #else
 

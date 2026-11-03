@@ -3,7 +3,7 @@
  * @brief   传感器系 → 机体(板子)系 轴向映射,统一处理各款 IMU。
  *
  *  映射定义:body[i] = sign[i] * sensor[axis[i]]  (axis: 0=x,1=y,2=z)
- *  在各驱动填完芯片原始轴物理量后、板子放置旋转(imu_orientation.h)之前调用。
+ *  在统一发布函数填完芯片原始轴物理量后、板子放置旋转(imu_orientation.h)之前调用。
  *
  *  级联:芯片原始轴 →[本层 sensor→body 映射]→ 板子系 →[imu_orient_apply 平/竖]→ 机体系
  *
@@ -13,9 +13,6 @@
 #ifndef IMU_FRAME_H
 #define IMU_FRAME_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 typedef struct {
     unsigned char axis[3];   /* 取哪个传感器轴:0=x, 1=y, 2=z */
@@ -39,8 +36,5 @@ extern const imu_axis_map_t IMU_MAP_ICM_GYRO;   /* ICM-45686 / ICM-42688-P 陀�
 extern const imu_axis_map_t IMU_MAP_BMI_ACCEL;  /* BMI088 加速度 */
 extern const imu_axis_map_t IMU_MAP_BMI_GYRO;   /* BMI088 陀螺 */
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* IMU_FRAME_H */

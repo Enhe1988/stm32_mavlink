@@ -43,6 +43,7 @@ typedef struct
     fp32 Iout;
     fp32 Dout;
     fp32 Dbuf[3];  //微分项 0最新 1上一次 2上上次
+    uint8_t dt_initialized;
     fp32 error[3]; //误差项 0最新 1上一次 2上上次
 
 } pid_type_def;
@@ -85,6 +86,9 @@ extern void PID_init(pid_type_def *pid, uint8_t mode, const fp32 PID[3], fp32 ma
  fp32 PID_calc(pid_type_def *pid, fp32 ref, fp32 set);
 
  fp32 yaw_PID_calc(pid_type_def *pid, fp32 ref, fp32 set);
+
+/** 位置式 PID，积分乘 dt、微分除 dt，带积分限幅和条件抗饱和。 */
+fp32 PID_calc_dt(pid_type_def *pid, fp32 ref, fp32 set, fp32 dt);
 /**
   * @brief          pid out clear
   * @param[out]     pid: PID struct data point

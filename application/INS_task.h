@@ -25,11 +25,13 @@ typedef struct
 	Auxiliary initialization variable
 	*/
   bool IMU_init_flag;  //accel Auxiliary initialization flag
+    uint32_t update_ms; /* 姿态快照发布时间 */
 	float pitch_setup_data;// pitch start angle
 	float roll_setup_data;  //roll start angle
 } IMU_data_t;
 void INS_task(void const *pvParameters);
 const IMU_data_t*get_imu_data_point(void);
+bool ins_get_snapshot(IMU_data_t *out);
 #define INS_YAW_ADDRESS_OFFSET    0
 #define INS_PITCH_ADDRESS_OFFSET  1
 #define INS_ROLL_ADDRESS_OFFSET   2

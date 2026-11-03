@@ -77,12 +77,12 @@ uint8_t SPL06_Init(SPL06_t *dev, I2C_HandleTypeDef *hi2c) {
     return 0; // 成功
 }
 
-// --- 步骤1: 启动 DMA 读取 (非阻塞) ---
+// 气压采集 步骤1：I2C 中断读取；函数名保留历史 DMA 字样。
 void SPL06_Start_Read_DMA(SPL06_t *dev) {
     if (dev->dma_busy) return; // 上一次还在传，跳过
 
     dev->dma_busy = 1;
-    // 使用 DMA 读取 6 字节到结构体内的 rx_buf
+    // 使用 I2C IT 读取 6 字节原始压力/温度，CPU 在中断服务中写 rx_buf。
    HAL_StatusTypeDef status = HAL_I2C_Mem_Read_IT(dev->hi2c, SPL06_I2C_ADDR, SPL06_REG_PRESS_DATA, 
                          I2C_MEMADD_SIZE_8BIT, dev->rx_buf, 6);
      if (status != HAL_OK) {
@@ -96,12 +96,11 @@ void SPL06_On_DMA_Complete(SPL06_t *dev) {
     dev->data_ready = 1; // 告诉任务数据好了
 }
 
-// --- 步骤3: 任务级解算 (含 Cache 维护和浮点运算) ---
+// 步骤3：任务级解算，符号扩展 -> 校准系数补偿 -> 气压/温度 -> 标准大气高度。
 void SPL06_Process_Data(SPL06_t *dev) {
     if (!dev->data_ready) return;
 
-    // H7 必须操作: DMA 写了 RAM，CPU 读之前要清除 Cache
-    //SCB_InvalidateDCache_by_Addr((uint32_t*)dev->rx_buf, 6);
+    // 当前是 CPU 的 I2C 中断写内存，未使用 DMA，无需对这个缓冲做 D-Cache 失效操作。
 
     uint8_t *buf = dev->rx_buf;
     int32_t raw_p, raw_t;

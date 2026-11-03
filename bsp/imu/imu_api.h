@@ -10,19 +10,16 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /**
  * @brief 统一 IMU 数据。已完成量纲换算 + 板子旋转 + 零偏标定。
- *        C 与 C++ 共用同一定义,内存布局一致。
+ *        三款传感器共用；采样时间戳单位为微秒，32 位自然回绕。
  */
 typedef struct {
     float    gyro[3];   /* rad/s,机体坐标系 */
     float    accel[3];  /* m/s^2,机体坐标系 */
     float    temp;      /* °C */
-    uint32_t timestamp; /* 采样时刻(us 或 tick,由驱动定义) */
+    uint32_t timestamp; /* 采样时刻(us) */
 } ImuData;
 
 typedef enum {
@@ -42,6 +39,19 @@ enum {
 extern volatile uint8_t g_imu_detected_mask;
 extern volatile imu_type_t g_imu_active_type;
 
+/** 所选设备的运行诊断；供调试器观察。 */
+typedef struct {
+    uint32_t sample_count;
+    uint32_t drdy_count;
+    uint32_t missed_drdy_count;
+    uint32_t dma_start_error_count;
+    uint32_t spi_error_count;
+    uint32_t invalid_sample_count;
+    int32_t start_result; /* 0=成功，-1=SPI，-5=任务创建失败 */
+    uint8_t running;
+} imu_status_t;
+extern volatile imu_status_t g_imu_status;
+
 /** @brief 读取各芯片身份寄存器并按固定优先级选择，不执行传感器配置。 */
 imu_type_t imu_detect(void);
 
@@ -54,11 +64,12 @@ void imu_start(void);
 /** @brief 取最新一帧标定后数据。调用后应立即复制，不要跨采样周期缓存指针。 */
 const ImuData *imu_get_data(void);
 
+/** @brief 任务中复制完整快照；尚未发布有效采样时返回 false 并复制零值。
+ *         允许重复读取同一帧，通过 timestamp 判断是否为新数据。 */
+bool imu_read(ImuData *out);
+
 /** @brief 返回当前选中的型号；未检测到时返回 IMU_TYPE_NONE。 */
 imu_type_t imu_get_type(void);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* IMU_API_H */

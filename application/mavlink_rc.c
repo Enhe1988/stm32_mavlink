@@ -108,6 +108,11 @@ static void Quaternion_to_Euler_Transform(const mavlink_set_attitude_target_t *p
     out->thrust = packet->thrust; // 传入油门
 }
 
+/* ELRS/MAVLink 遥控和上位机目标
+ * RC_CHANNELS_OVERRIDE 承载接收机通道，不在这里解析 ELRS 射频或原生 CRSF。
+ * SET_ATTITUDE_TARGET 承载上位机姿态/推力；整帧 decode 后先填局部 next 再原子发布。
+ * update_ms 供失联保护，frame_count 供遥控前馈识别新帧，valid 区分尚未收到与有效零值。
+ * 注意：历史 Quaternion_to_Euler_Transform 的 Pitch/Roll 字段与公式仍待核对修正。 */
 void mavlink_rc_dispatch(const mavlink_message_t *msg)
 {
     switch (msg->msgid)

@@ -28,7 +28,7 @@ extern "C" {
 void Mavlink_Init(void);
 
 /**
-  * @brief  MAVLink 解析任务:等待 RX/错误通知，排空对应端口，并维持周期发送。
+  * @brief  MAVLink 解析任务:等待 RX/错误通知，排空对应端口，并维持 20Hz 遥测 DMA。
   */
 void mavlink_task(void const *pvParameters);
 

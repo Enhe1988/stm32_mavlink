@@ -7,9 +7,6 @@
 
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 typedef struct {
     uint8_t  icm45686_who_am_i;  /* 期望 0xE9 */
@@ -37,8 +34,5 @@ extern volatile imu_selftest_t g_imu_selftest;
 /** @brief 兼容旧调用：执行一次全型号身份探测，不启动采集。 */
 void imu_selftest_run(void);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* IMU_SELFTEST_H */

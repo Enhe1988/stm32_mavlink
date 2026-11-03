@@ -5,16 +5,13 @@
  *          ImuData 的最后一步,对 gyro、accel 各调一次。
  *
  *          这一级与“每芯片安装映射”分离:安装映射在各驱动内部(把芯片轴对到
- *          板子轴),这里只处理整块板子怎么放(平/竖)。零偏在芯片系、旋转之前减。
+ *          板子轴),这里只处理整块板子怎么放(平/竖)。零偏在板子系、放置旋转之前减。
  */
 #ifndef IMU_ORIENTATION_H
 #define IMU_ORIENTATION_H
 
 #include "bsp_config.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 static inline void imu_orient_apply(float v[3])
 {
@@ -46,8 +43,5 @@ static inline void imu_orient_unapply(float v[3])
 #endif
 }
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* IMU_ORIENTATION_H */

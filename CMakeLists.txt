@@ -12,8 +12,6 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
 # Define the build type
@@ -28,11 +26,10 @@ set(CMAKE_PROJECT_NAME fly_control_stm)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # Core project settings
-project(${CMAKE_PROJECT_NAME})
+project(${CMAKE_PROJECT_NAME} LANGUAGES C ASM)
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
-# Enable CMake support for ASM, C and C++ languages
-enable_language(C CXX ASM)
+# Project uses C11 and the startup assembly only.
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
@@ -55,8 +52,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     application/mavlink_rc.c
     application/mavlink_flow.c
     application/mavlink_app.c
+    application/mavlink_telemetry.c
+    algorithm/optical_flow.c
     algorithm/pid.c
     algorithm/filter.c
+    algorithm/aircraft_mixer.c
+    algorithm/attitude_control.c
     bsp/bmi08a.c
     bsp/bmi08g.c
     bsp/bmi08xa.c
@@ -64,15 +65,15 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     bsp/bmi088_mma.c
     bsp/common.c
     bsp/spl06.c
-    # IMU 抽象层(我们写)
-    bsp/imu/imu_api.cpp
-    bsp/imu/Icm45686.cpp
-    bsp/imu/Icm42688p.cpp
-    bsp/imu/Bmi088.cpp
-    bsp/imu/icm_platform.c
+    # IMU 纯 C：统一接口、共享 ICM 采集、芯片配置与公共处理
+    bsp/imu/imu_api.c
+    bsp/imu/icm_acq.c
+    bsp/imu/icm45686.c
+    bsp/imu/icm42688p.c
+    bsp/imu/bmi088.c
+    bsp/bsp_platform.c
     bsp/imu/imu_frame.c
     bsp/imu/imu_calib.c
-    bsp/imu/imu_selftest.cpp
 )
 
 # Add include paths
@@ -95,8 +96,6 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     ARM_MATH_CM7
 )
 
-# Remove wrong libob.a library dependency when using cpp files
-list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
 # Add linked libraries
 target_link_libraries(${CMAKE_PROJECT_NAME}

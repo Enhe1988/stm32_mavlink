@@ -1,19 +1,19 @@
 /**
- * @file    icm_platform.c
- * @brief   ICM 驱动平台服务：基于 Cortex-M7 DWT 的微秒计时/延时，
+ * @file    bsp_platform.c
+ * @brief   板级公共服务：基于 Cortex-M7 DWT 的微秒计时/延时，
  *          以及 RAM_D2 DMA 区域的 MPU 配置。
  *
  *  DWT->CYCCNT 是 32 位、按 SystemCoreClock 递增。这里维护一个 64 位累加器,
  *  每次读取补上自上次以来的增量(含整 32 位回绕),换算成 us 返回。
  */
-#include "icm_platform.h"
+#include "bsp_platform.h"
 #include "stm32h7xx_hal.h"
 
 static uint32_t s_cyc_per_us  = 1;   /* 每微秒周期数,init 时刷新 */
 static uint64_t s_accum_cyc   = 0;   /* 64 位累计周期 */
 static uint32_t s_last_cyc    = 0;   /* 上次读到的 CYCCNT */
 
-void icm_platform_timer_init(void)
+void bsp_time_init(void)
 {
     /* 使能 trace + DWT 周期计数器 */
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -31,7 +31,7 @@ void icm_platform_timer_init(void)
     s_accum_cyc = 0;
 }
 
-uint64_t icm_platform_get_time_us(void)
+uint64_t bsp_time_us(void)
 {
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
@@ -47,7 +47,7 @@ uint64_t icm_platform_get_time_us(void)
     return us;
 }
 
-void icm_platform_delay_us(uint32_t us)
+void bsp_delay_us(uint32_t us)
 {
     /* DWT 忙等。init 序列里最长约 60ms;在 480MHz 下 ~2.9e7 周期 < 32 位范围,安全。 */
     uint32_t start  = DWT->CYCCNT;
@@ -57,13 +57,18 @@ void icm_platform_delay_us(uint32_t us)
     }
 }
 
-void icm_platform_dma_region_init(void)
+/* H743 D-Cache 与 DMA 一致性设计
+ * DMA1/2 不通过 M7 的 D-Cache；缓存可导致 CPU 与 DMA 观察到不同内存内容。
+ * 解决策略是仅将 .dma_buffer 对应区域标记 Normal 非缓存，其他区域仍可使用 D-Cache。
+ * 2KB MPU 区要求基址按 2KB 对齐；链接脚本将段放在 0x30000000 并断言容量不超 2KB。
+ * 必须先配置此区域，再 EnableDCache，再启动任何 SPI/UART DMA；运行中不重复改 MPU。 */
+void bsp_dma_region_init(void)
 {
     /* 把 .dma_buffer 所在的 RAM_D2 起始 2KB 标记为 Normal 非缓存,
      * 解决 H743 "DMA 写内存 / CPU 读旧缓存" 一致性问题。
      * 只新增 region1,不动生成代码里 MPU_Config 的 region0(重生成安全)。
      * 容量需覆盖该段所有 DMA 缓冲:两款 ICM SPI + USART3 RX(1024B) +
-     * USART2 RX(256B,光流),当前链接结果为 1408B。新增缓冲需确保不超 2KB。 */
+     * USART2 RX(256B,光流),两款 ICM 共用一组缓冲。新增缓冲需确保不超 2KB。 */
     MPU_Region_InitTypeDef cfg = {0};
 
     HAL_MPU_Disable();

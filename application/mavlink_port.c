@@ -35,6 +35,12 @@ void MavPort_OnRxEventFromISR(MavlinkPort_t *port,
     port->rx_events++;
 }
 
+/* DMA 环形接收 + NDTR + 官方解析器
+ * N 是环形缓冲容量，不是某条消息长度；N-NDTR 是本圈的写入位置。
+ * produced=TC圈数*N+(N-NDTR)，consumed 是软件累计读量，二者差为待解析字节数。
+ * tail 随每个字节递增并回绕，因此一帧跨缓冲末尾时仍连续喂同一 parser。
+ * 若积压超过 N，较老字节已被覆盖：统计丢字节并重置残帧，而不是解析已损坏的前半帧。
+ * 每条物理流使用自己的 port->chan；这里在任务上下文逐字节解析，ISR 不解码协议。 */
 uint32_t MavPort_Drain(MavlinkPort_t *port)
 {
     uint32_t wraps_before;

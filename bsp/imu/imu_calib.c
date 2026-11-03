@@ -62,7 +62,9 @@ void imu_calib_run(unsigned samples)
     double asum[3] = {0.0, 0.0, 0.0};
 
     for (unsigned n = 0; n < samples; ++n) {
-        const ImuData *d = imu_get_data();   /* 机体系 */
+        ImuData sample;
+        (void)imu_read(&sample);
+        const ImuData *d = &sample;   /* 机体系完整快照 */
         for (int i = 0; i < 3; ++i) {
             gsum[i] += d->gyro[i];
             asum[i] += d->accel[i];
